@@ -1,124 +1,100 @@
-# SatPass: satellite pass predictor
+# SatPass
 
-A static, browser-only satellite pass predictor. It downloads live orbital elements from CelesTrak, runs SGP4 in your browser, and shows when the ISS, Tiangong, Hubble and other bright satellites cross your sky. It also tells you which passes you can actually see with the naked eye.
+[SatPass](https://satpass.lukedw09.workers.dev/) is a satellite pass predictor. It shows when the ISS, Tiangong, Hubble, and other bright satellites cross your sky, and which of those passes you can see with the naked eye.
 
-Defaults to **Killearn Lakes, north Tallahassee, FL** (30.588° N, 84.243° W, 60 m). You can type any location or click **Use my location**. All times are shown in **America/New_York** (EST/EDT).
+**Use it at [satpass.lukedw09.workers.dev](https://satpass.lukedw09.workers.dev/).**
 
-![SatPass screenshot](docs/screenshot.png)
+![SatPass, with a pass list, sky chart, and live ground track](docs/screenshot.png)
 
-## Features
+It opens on Killearn Lakes, north Tallahassee, Florida (30.588° N, 84.243° W, 60 m). Every clock time on the page is Eastern Time (EST or EDT), even if you move the observer somewhere else.
 
-- **7-day pass list** (1 to 10 days) for every satellite you've ticked. Each pass shows rise, culmination and set times, max elevation, compass directions and duration.
-- **Naked-eye visibility.** A pass counts as visible when *you* are in darkness (sun below −6° by default, which you can change), the satellite is **sunlit** (not in Earth's shadow), and it's at least 10° up. The visible window gets its own start, peak and end times, accurate to about 1 s.
-- **Polar sky chart** for the selected pass. The track is colored by state: visible, sunlit but not visible, or in shadow. Rise, max and set are marked.
-- **Live now** panel with current azimuth/elevation, range, altitude, sub-satellite point, speed, sunlit/shadow, and the next rise and next visible pass.
-- **Ground-track world map** covering −45 to +90 min, with the visibility footprint, your location, and the day/night terminator. It's drawn on a canvas with Natural Earth outlines, no map library.
-- **Add any satellite** by NORAD catalog number or name. It searches the loaded catalog first, then queries CelesTrak. Remove satellites with ✕.
-- Settings, your satellite list, and the last TLE download are saved in `localStorage`.
+## Set your location
 
-Default satellites: ISS (25544), Tiangong/CSS (48274), Hubble (20580), Envisat (27386), and two SL-16 rocket bodies (25407, 22566).
+Under **Observer**, type a name, latitude, longitude, and elevation in meters. Or click **Use my location** and let the browser fill them in (it will ask permission). **Killearn Lakes** restores the default spot. This browser remembers your place, your filters, and your satellite list.
 
-## Live data source
+## Add and remove satellites
 
-Orbital elements come from **[CelesTrak](https://celestrak.org/)**'s GP API as TLEs:
+The list starts with the ISS, Tiangong, Hubble, Envisat, and two bright SL-16 rocket bodies. A tick includes that satellite in the search. Untick a row to skip it. **✕** removes it.
 
-| Request | Used for |
+To add one, type a name or a NORAD catalog number — `HST` or `25544` — and press **Add**. Suggestions come from the space stations and the bright-satellite list. A NORAD number picks one object for sure. If a name matches several satellites, SatPass adds the first and tells you; enter the number to choose another.
+
+## Filters
+
+These sit under **Search**:
+
+- **Days** — how far ahead to look, from 1 to 10. The default is 7.
+- **Min max-el °** — hide passes that never get this high. `10` (the default) keeps passes that reach at least 10° above the horizon. `0` keeps anything that rises at all. `40` keeps only high ones.
+- **Sun below °** — how far below the horizon the Sun must be before the sky counts as dark. The default is −6° (about civil twilight). The allowed range is −18° (a darker sky) to 0° (sunset level).
+- **Visible (naked-eye) passes only** — on by default. Turn it off to list daylight and shadowed passes too. Each of those rows says why it fails: daylight, in shadow, or too low.
+
+The line above the table looks like `5 shown · 5 visible · next 7 days · times EST`. If nothing is listed, lower the minimum elevation, add days, or turn visible-only off.
+
+## Reading a pass
+
+Click a row. That pass is drawn on the sky chart, and **Live now** follows that satellite.
+
+| Column | Meaning |
 |---|---|
-| `gp.php?GROUP=stations&FORMAT=tle` | ISS, Tiangong and other crewed stations |
-| `gp.php?GROUP=visual&FORMAT=tle` | the roughly 160 brightest satellites ("visual" group) |
-| `gp.php?CATNR=<norad>&FORMAT=tle` | adding a satellite by catalog number |
-| `gp.php?NAME=<text>&FORMAT=tle` | adding a satellite by name |
+| Date | The day of the pass. **NOW** means it is above the horizon at this moment. |
+| Satellite | Which object. The dot color matches the list on the left. |
+| Rise | When it crosses your horizon, and the compass point to look toward (N, NE, WSW, and so on). |
+| Max | The highest point: the time, the elevation in degrees, and the compass point. 0° is the horizon and 90° is straight overhead. A 20° pass is low; 60° is high in the sky. |
+| Set | When it drops below the horizon again, and the compass point in that direction. |
+| Dur | How long it stays above the horizon, such as `10m 13s`. |
+| Visible window | The stretch you can see, or the reason you cannot. |
 
-**CORS:** CelesTrak sends `Access-Control-Allow-Origin: *`, so the browser can fetch it directly from `https://…pages.dev`, from `localhost`, or even from a `file://` page. No proxy or server is needed. This was verified with real request headers and in headless Chrome.
+A visible window looks like `★ 7:29:15 PM – 7:32:01 PM`, plus the best point of that stretch, such as `max 23° NW`. Rise, max, and set describe the whole pass from horizon to horizon. The starred times are the shorter part worth going outside for.
 
-**Being polite:** CelesTrak updates GP data about every 2 hours and blocks clients that poll too often. SatPass therefore:
-- reuses the cached download (in `localStorage`) for 2 hours before fetching again automatically
-- disables the manual **↻ Refresh TLEs** button for 10 minutes after each download
+## The sky chart
 
-**Offline fallback:** if the live request fails (offline, blocked, or CelesTrak is down), SatPass uses the last cached download. If there isn't one, it uses a **bundled snapshot** (`data/fallback-tle.js`). The header always shows which source is in use and how old it is. TLE accuracy degrades over days, so each satellite in the list also shows its TLE epoch age, in orange when it's older than 5 days. To refresh the bundled snapshot:
+The chart looks straight up. The center is overhead, the rim is the horizon, and the rings mark 30° and 60°. North is at the top. Stand facing the rise direction from the table, then follow the arc.
 
-```bash
-node tools/update-fallback.mjs
-```
+The line uses the legend under the chart:
 
-## How passes and visibility are computed
+- **Gold — sunlit & dark sky (visible).** This is the part to watch.
+- **Blue — sunlit, not visible.** The satellite is in sunlight, and your sky is still bright or it is below 10°.
+- **Dim — in Earth's shadow.** Earth is between the Sun and the satellite, so it goes dark.
 
-All of this runs in `js/core.js`, using [satellite.js](https://github.com/shashwatak/satellite-js) (SGP4/SDP4).
+A circle is rise, a diamond is the highest point, and a square is set. During a pass that is happening now, a green dot marks where it is. Under the chart: duration, distance at the highest point, and the Sun's altitude then. If the satellite enters shadow before it sets, the note says it fades into Earth's shadow.
 
-1. **Propagation:** each TLE is converted to a `satrec` and propagated with SGP4. Positions are rotated to Earth-fixed coordinates with GMST and converted to topocentric azimuth/elevation/range for the observer (WGS-84 geodetic lat/lon/height).
-2. **Pass search:** elevation is sampled every 30 s. Each crossing of the 0° horizon is refined by bisection to about 0.5 s (rise/set), and culmination is found with a golden-section search (about 0.5 s). Passes whose max elevation is below the **Min max-el** setting are hidden. Objects that stay up for more than 6 h (GEO-like) are skipped.
-3. **Sun and shadow:** the sun position comes from `satellite.sunPos`. The observer's sun altitude decides whether the sky is dark enough. Earth's shadow comes from `satellite.shadowFraction`, which models the solar disc covered by Earth; the satellite counts as sunlit when less than half the disc is hidden.
-4. **Visible window:** each pass is sampled every 10 s. A point is *visible* when the sun is below the threshold, the satellite is sunlit, and it's at least 10° above the horizon. The window edges are refined by bisection to about 1 s.
+**Live now**, next to the chart, updates every second with direction, elevation, distance, height, speed, and whether the satellite is sunlit. The map draws its ground track from 45 minutes ago through 90 minutes ahead, the region where it is above the horizon, your location, and the night side of Earth.
 
-Rise/set are reported at the true 0° horizon. The *visible window* is what to plan around, and it matches how Heavens-Above lists visible passes (start/end at 10° or at shadow entry).
+## What "visible" means
 
-## Accuracy check
+A moment is visible only when all three are true:
 
-ISS (25544), TLE epoch 2026-11-09 20:27 UTC, observer 30.588° N 84.243° W 60 m, 7-day window starting 2026-11-10 11:00 UTC:
+1. **You are in the dark.** The Sun is below the **Sun below** number (default −6°).
+2. **The satellite is sunlit**, clear of Earth's shadow.
+3. **It is at least 10° up**, high enough to clear a lot of rooftops and trees.
 
-**vs. an independent [Skyfield](https://rhodesmill.org/skyfield/) computation** (same TLE, DE421 ephemeris for the sun and shadow), over all 46 passes:
+That 10° floor stays put. **Min max-el** only decides which passes get a row. The visible window still opens at 10°.
 
-| Quantity | Max abs difference |
-|---|---|
-| Rise time | 0.38 s |
-| Culmination time | 0.19 s |
-| Set time | 0.34 s |
-| Max elevation | 0.01° |
-| Sun altitude at culmination | < 0.01° |
-| Sunlit/shadow state at culmination | 0 mismatches |
+## Spotting it
 
-**vs. [Heavens-Above](https://www.heavens-above.com/)** visible ISS passes for the same location (EST):
+Be outside about a minute before the visible window opens, and look toward the rise compass direction, just above the horizon. You are looking for a steady, non-blinking moving dot that slides along the path on the chart. Keep following that arc. When the gold line ends and the track turns dim, the satellite is entering Earth's shadow and fades from sight.
 
-| Pass | Heavens-Above (start / max / end) | SatPass (start / max / end) |
-|---|---|---|
-| Tue Nov 10 | 7:29:15 W 10° / 7:31:59 23° / 7:32:03 | 7:29:15 W 10° / 7:31:59 23.4° / 7:32:01 |
-| Wed Nov 11 | 6:41:00 WSW 10° / 6:44:11 42° / 6:46:37 | 6:41:01 WSW 10° / 6:44:11 41.9° / 6:46:32 |
-| Fri Nov 13 | 6:43:42 WNW 10° / 6:45:39 15° / 6:47:38 | 6:43:42 WNW 10° / 6:45:39 14.6° / 6:47:36 |
+The ISS is usually an obvious bright light. Hubble and the rocket bodies are much fainter, and a pass can meet the visible test and still be hard to see.
 
-Start and peak times agree to within about 1 s. Shadow-entry times differ by 2 to 5 s because the two tools use different Earth-shadow models. Heavens-Above also showed **no** visible Envisat or SL-16 (25407) passes in that window, and the same is true in SatPass. Hubble's low dawn passes on Nov 17/18/19 (6:27:40, 5:54:33 and 5:21:42 AM) match SatPass's 10-day results (6:27:40, 5:54:34 and 5:21:44 AM).
+## Where the data comes from, and how fresh it is
 
-## Run locally
+Orbital data comes from [CelesTrak](https://celestrak.org/). The header says which copy the page is using:
 
-There's no build step and nothing to install. Either:
+- **CelesTrak live** — downloaded just now.
+- **CelesTrak (cached in this browser)** — that same download, reused for about 2 hours.
+- **Offline: bundled TLE snapshot** — a copy saved with the site, used when CelesTrak cannot be reached and this browser has nothing newer.
 
-- double-click `index.html` (works from `file://`; tested in Chrome), or
-- serve the folder: `python3 -m http.server 8000`, then open <http://localhost:8000>.
+Next to the source is the fetch time and an age, such as `just now` or `3.2 h ago`. That age turns orange after 3 days. Each satellite also shows its own element-set age, such as `TLE epoch 0.6 d old`, and that label turns orange after 5 days. Older elements drift, so an orange age is a reason to refresh before you count on a time.
 
-"Use my location" needs a secure context (https, localhost, or file).
+**↻ Refresh TLEs** downloads a new copy. The button then waits 10 minutes, because CelesTrak asks people not to fetch too often.
 
-## Deploy on Cloudflare Pages
+## How the predictions work
 
-1. Push this repo to GitHub.
-2. In the Cloudflare dashboard, go to **Workers & Pages → Create → Pages → Connect to Git** and pick the repo.
-3. Build settings: **Framework preset:** None · **Build command:** *(leave empty)* · **Build output directory:** `/`
-4. Click **Save and Deploy**. The site goes live at `https://<project>.pages.dev`.
+CelesTrak publishes a short description of each orbit, called an element set. SatPass runs those numbers through SGP4, the standard orbit model, in your browser with [satellite.js](https://github.com/shashwatak/satellite-js). SGP4 gives the satellite's position at the time in question. From your latitude and longitude, that becomes a compass direction and an elevation. The Sun's position does the rest: it decides whether your sky is dark, and whether Earth is casting its shadow across the satellite. The pass list, the sky chart, and the live map are that same calculation drawn three ways.
 
-Or from a terminal: `npx wrangler pages deploy . --project-name satpass`
+## Accuracy and limits
 
-## Project layout
+A fresh element set is usually good to about a kilometer, which is close enough to find the pass by eye. The error grows as the set ages, which is what the age labels are for. The ISS reboosts its orbit, and a burn can move a pass by tens of seconds until CelesTrak publishes a new set.
 
-```
-index.html              page
-css/style.css           dark UI
-js/core.js              TLE parsing, look angles, sun/shadow, pass search (no DOM)
-js/app.js               UI, data loading, sky chart, live panel, map
-vendor/satellite.min.js satellite.js 7.1.0 subset bundle (MIT)
-data/fallback-tle.js    bundled TLE snapshot (offline fallback)
-data/land-110m.js       Natural Earth 110m land outlines (public domain)
-tools/update-fallback.mjs  refresh the bundled snapshot (Node 18+)
-docs/screenshot.png
-```
+There is no brightness or magnitude. "Visible" is geometry: dark sky, sunlit satellite, at least 10° up. Terrain is ignored, so a hill or a building can hide a low pass. Atmospheric refraction is ignored too; it lifts an object on the horizon by about half a degree and shifts rise or set by a few seconds. Times are always Eastern, whatever time zone you are standing in.
 
-## Limitations
-
-- The TLE + SGP4 accuracy is about 1 km at epoch and drifts with TLE age. ISS reboosts and maneuvers can shift times by tens of seconds until a new TLE is published.
-- There's no magnitude/brightness estimate. "Visible" means geometrically observable, not guaranteed bright (rocket bodies and Hubble are dimmer than the ISS).
-- No atmospheric refraction (about 0.5° at the horizon, which only affects rise/set by a few seconds). Terrain and buildings aren't modeled.
-- Times are always shown in America/New_York, even if you move the observer elsewhere.
-- Starlink trains and other very large groups aren't preloaded. Add individual objects by NORAD number.
-
-## Credits and license
-
-Orbital data © [CelesTrak](https://celestrak.org/) (T.S. Kelso). SGP4 by [satellite.js](https://github.com/shashwatak/satellite-js) (MIT, see `vendor/satellite.js-LICENSE.md`). Coastlines from [Natural Earth](https://www.naturalearthdata.com/) via world-atlas.
-
-Code © 2026 Luke de Wet, released under the [MIT License](LICENSE).
+To run a copy yourself, open `index.html` in a browser. MIT License © 2026 Luke de Wet. Orbits from [CelesTrak](https://celestrak.org/). Predictions use [satellite.js](https://github.com/shashwatak/satellite-js) (MIT). Coastlines from [Natural Earth](https://www.naturalearthdata.com/).
