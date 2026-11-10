@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SatPass · Satellite pass predictor</title>
+<meta name="description" content="Browser-only satellite pass predictor: ISS, Tiangong, Hubble and bright satellites, with naked-eye visibility, sky charts and live ground track.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230b1020' stroke='%236ea8ff' stroke-width='2'/%3E%3Cpath d='M5 21 Q16 4 27 11' fill='none' stroke='%23ffd166' stroke-width='2'/%3E%3Ccircle cx='22' cy='8.6' r='2.6' fill='%23ffd166'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">◔</span> SatPass <span class="sub">satellite pass predictor</span></div>
+  <div id="dataStatus" class="status">Loading orbit data…</div>
+  <button id="refreshBtn" class="ghost" title="Re-download TLEs from CelesTrak">↻ Refresh TLEs</button>
+</header>
+
+<main>
+  <aside>
+    <section class="card">
+      <h2>Observer</h2>
+      <label>Name <input id="obsName" type="text"></label>
+      <div class="row3">
+        <label>Lat ° <input id="obsLat" type="number" step="0.0001" min="-90" max="90"></label>
+        <label>Lon ° <input id="obsLon" type="number" step="0.0001" min="-180" max="180"></label>
+        <label>Elev m <input id="obsElev" type="number" step="1"></label>
+      </div>
+      <div class="btns">
+        <button id="geoBtn" class="ghost">Use my location</button>
+        <button id="resetObsBtn" class="ghost">Killearn Lakes</button>
+      </div>
+      <div class="hint" id="geoMsg"></div>
+    </section>
+
+    <section class="card">
+      <h2>Search</h2>
+      <div class="row3">
+        <label>Days <input id="optDays" type="number" min="1" max="10" step="1"></label>
+        <label>Min max-el ° <input id="optMinEl" type="number" min="0" max="89" step="1"></label>
+        <label>Sun below ° <input id="optSun" type="number" min="-18" max="0" step="1"></label>
+      </div>
+      <label class="check"><input id="optVisOnly" type="checkbox"> Visible (naked-eye) passes only</label>
+    </section>
+
+    <section class="card">
+      <h2>Satellites</h2>
+      <ul id="satList" class="satlist"></ul>
+      <form id="addForm" class="addform">
+        <input id="addInput" list="catalog" placeholder="NORAD # or name (e.g. 25544, HST)" autocomplete="off">
+        <datalist id="catalog"></datalist>
+        <button type="submit">Add</button>
+      </form>
+      <div class="hint" id="addMsg"></div>
+    </section>
+  </aside>
+
+  <section class="content">
+    <div class="card">
+      <div class="cardhead">
+        <h2>Upcoming passes</h2>
+        <span id="passCount" class="muted"></span>
+      </div>
+      <div class="tablewrap">
+        <table id="passTable">
+          <thead><tr>
+            <th>Date</th><th>Satellite</th><th>Rise</th><th>Max</th><th>Set</th><th>Dur</th><th>Visible window</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <div class="cardhead"><h2>Sky chart</h2><span id="skyTitle" class="muted">select a pass</span></div>
+        <canvas id="sky" width="520" height="520"></canvas>
+        <div id="skyInfo" class="info"></div>
+        <div class="legend"><span class="lg lit"></span>sunlit &amp; dark sky (visible) <span class="lg day"></span>sunlit, not visible (bright sky or below 10°) <span class="lg shadow"></span>in Earth's shadow</div>
+      </div>
+      <div class="card">
+        <div class="cardhead"><h2>Live now</h2>
+          <select id="liveSat"></select>
+        </div>
+        <div id="live" class="live"></div>
+        <canvas id="map" width="720" height="360"></canvas>
+        <div class="legend"><span class="lg track"></span>ground track −45 → +90 min <span class="lg obs"></span>observer <span class="lg night"></span>night side</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Orbits: <a href="https://celestrak.org/" target="_blank" rel="noopener">CelesTrak</a> GP element sets · SGP4 via <a href="https://github.com/shashwatak/satellite-js" target="_blank" rel="noopener">satellite.js</a> · Coastlines: Natural Earth · Times in <span id="tzLabel">America/New_York</span> · <a href="https://github.com/Lukedw09/satpass" target="_blank" rel="noopener">source</a>
+</footer>
+
+<script src="vendor/satellite.min.js"></script>
+<script src="data/fallback-tle.js"></script>
+<script src="data/land-110m.js"></script>
+<script src="js/core.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
