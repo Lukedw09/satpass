@@ -45,6 +45,12 @@ Click a row. That pass is drawn on the sky chart, and **Live now** follows that 
 
 A visible window looks like `★ 7:29:15 PM – 7:32:01 PM`, plus the best point of that stretch, such as `max 23° NW`. Rise, max, and set describe the whole pass from horizon to horizon. The starred times are the shorter part worth going outside for.
 
+## Reminders
+
+Every pass row, and the sky-chart detail under it, has a bell and an **Add to calendar** button. The bell asks for notification permission the first time you use it (or when you turn on the ISS option), then rings before the pass becomes visible. Choose **5, 10, or 15 minutes** under **Alerts**. **10** is the default. A gold bell means that pass is armed, and the card says how many alerts are set. **Notify me for all visible ISS passes** arms every visible ISS pass for you. The choice is remembered in this browser.
+
+Alerts work while SatPass is open, or while it is installed and running. A closed tab does not ring. **Add to calendar** downloads an `.ics` file with the same lead time, so your phone can remind you anyway. On an iPhone, Safari shows browser alerts only after you add SatPass to your Home Screen and open it from there; until then, use the calendar file.
+
 ## The sky chart
 
 The chart looks straight up. The center is overhead, the rim is the horizon, and the rings mark 30° and 60°. North is at the top. Stand facing the rise direction from the table, then follow the arc.

@@ -7,8 +7,9 @@
   const GROUPS = ['stations', 'visual'];
   const AUTO_REFRESH_MS = 2 * 3600e3;      // CelesTrak updates GP data ~every 2 h; don't poll faster
   const MANUAL_COOLDOWN_MS = 10 * 60e3;
-  const LS_TLE = 'satpass.tle.v1', LS_SET = 'satpass.settings.v1', LS_CUSTOM = 'satpass.custom.v1';
+  const LS_TLE = 'satpass.tle.v1', LS_SET = 'satpass.settings.v1', LS_CUSTOM = 'satpass.custom.v1', LS_ALERTS = 'satpass.alerts.v1';
   const HOME = { name: 'Killearn Lakes, Tallahassee FL', lat: 30.588, lon: -84.243, elev: 60 };
+  const ISS_NORAD = 25544;
   const DEFAULT_SATS = [25544, 48274, 20580, 27386, 25407, 22566];
   const PALETTE = ['#ffd166', '#ff7b7b', '#6ea8ff', '#3ddc97', '#c792ea', '#ff9f43', '#4dd0e1', '#f78fb3', '#a3e635', '#e2e8f0'];
 
@@ -23,6 +24,8 @@
   let satObjs = new Map();                  // norad -> SatCore sat
   let dataMeta = null;
   let passes = [], selKey = null, liveNorad = null, lastFetchMs = 0;
+  let alerts = loadAlerts();
+  const alertTimers = new Map();
 
   // ---------- formatting ----------
   const fmtTime = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit', second: '2-digit' });
@@ -180,9 +183,288 @@
       catch (e) { console.warn('pass search failed', sat.name, e); }
     }
     passes = all.filter(p => p.set.t > now).sort((a, b) => a.rise.t - b.rise.t);
+    reconcileAlerts();
     renderPasses();
   }
   const keyOf = p => `${p.norad}:${Math.round(p.rise.t / 60000)}`;
+
+  // ---------- alerts ----------
+  const BELL_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>';
+  const CAL_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>';
+  const ALERT_NOTE = 'Alerts work while SatPass is open (or installed and running). Add to calendar for a phone reminder that still works when this tab is closed.';
+
+  function loadAlerts() {
+    const blank = { leadMin: 10, issAll: false, armed: {}, dismissed: {}, fired: {} };
+    const v = load(LS_ALERTS, null);
+    if (!v || typeof v !== 'object') return blank;
+    const lead = [5, 10, 15].includes(+v.leadMin) ? +v.leadMin : 10;
+    return {
+      leadMin: lead,
+      issAll: !!v.issAll,
+      armed: v.armed && typeof v.armed === 'object' ? v.armed : {},
+      dismissed: v.dismissed && typeof v.dismissed === 'object' ? v.dismissed : {},
+      fired: v.fired && typeof v.fired === 'object' ? v.fired : {}
+    };
+  }
+  function saveAlerts() {
+    const cutoff = Date.now() - 2 * 86400e3;
+    const fired = {};
+    for (const [k, t] of Object.entries(alerts.fired || {})) if (t > cutoff) fired[k] = t;
+    alerts.fired = fired;
+    save(LS_ALERTS, { leadMin: alerts.leadMin, issAll: alerts.issAll, armed: alerts.armed, dismissed: alerts.dismissed, fired });
+  }
+  function setAlertMsg(text, err) {
+    const el = $('alertMsg'); if (!el) return;
+    el.className = err ? 'hint err' : 'hint';
+    el.textContent = text || '';
+  }
+  function refreshAlertNote() {
+    const el = $('alertNote'); if (!el) return;
+    const n = Object.keys(alerts.armed).length;
+    el.textContent = (n ? `${n} alert${n === 1 ? '' : 's'} set. ` : '') + ALERT_NOTE;
+  }
+  function passEvent(p) { return p.visible ? p.visible.start.t : p.rise.t; }
+  function describePass(p) {
+    if (p.visible) {
+      const v = p.visible;
+      return `Visible ${T(v.start.t)}–${T(v.end.t)}, max ${deg(v.max.el)} ${C.compass(v.max.az)}. Look ${C.compass(v.start.az)}.`;
+    }
+    return `Rises ${T(p.rise.t)} ${C.compass(p.rise.az)}, max ${deg(p.max.el)} ${C.compass(p.max.az)}.`;
+  }
+  function recordFromPass(p, auto) {
+    return {
+      norad: p.norad, name: p.name, riseT: p.rise.t,
+      eventT: passEvent(p), endT: p.visible ? p.visible.end.t : p.set.t,
+      leadMin: alerts.leadMin, auto: !!auto, visible: !!p.visible, text: describePass(p)
+    };
+  }
+  function notifyUnavailableMessage() {
+    const ua = navigator.userAgent || '';
+    const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    let standalone = false;
+    try { standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches; } catch { /* ignore */ }
+    if (typeof Notification !== 'function') {
+      if (ios && !standalone) return 'On iPhone and iPad, Safari shows alerts only after you add SatPass to your Home Screen and open it from there. Use Add to calendar for a reminder that works while SatPass is closed.';
+      return 'This browser cannot show alerts. Use Add to calendar on a pass — that reminder still fires when SatPass is closed.';
+    }
+    if (Notification.permission === 'denied') return 'Alerts are blocked for this site. Allow notifications in the browser settings, or use Add to calendar.';
+    return null;
+  }
+  async function ensurePermission() {
+    const blocked = notifyUnavailableMessage();
+    if (blocked) { setAlertMsg(blocked, true); return false; }
+    if (Notification.permission === 'granted') return true;
+    try {
+      const result = await Notification.requestPermission();
+      if (result !== 'granted') {
+        setAlertMsg('Alerts were not allowed. Use Add to calendar on a pass for a reminder that works when this tab is closed.', true);
+        return false;
+      }
+      return true;
+    } catch {
+      setAlertMsg('Alerts are not available in this browser. Use Add to calendar instead.', true);
+      return false;
+    }
+  }
+  function clearAlertTimer(k) {
+    if (!alertTimers.has(k)) return;
+    clearTimeout(alertTimers.get(k));
+    alertTimers.delete(k);
+  }
+  function showAlert(k) {
+    const rec = alerts.armed[k];
+    if (!rec || rec.eventT <= Date.now()) return;
+    if (alerts.fired[k] && Date.now() - alerts.fired[k] < 12 * 3600e3) return;
+    if (typeof Notification !== 'function' || Notification.permission !== 'granted') return;
+    alerts.fired[k] = Date.now();
+    saveAlerts();
+    const mins = Math.max(0, Math.round((rec.eventT - Date.now()) / 60000));
+    const when = mins <= 1 ? 'in about a minute' : `in ${mins} min`;
+    try {
+      const n = new Notification(`${rec.name} ${when}`, { body: rec.text, tag: 'satpass-' + k, lang: 'en' });
+      n.onclick = () => { try { window.focus(); } catch { /* ignore */ } n.close(); };
+    } catch { /* the browser refused to display it */ }
+  }
+  function scheduleOne(k) {
+    clearAlertTimer(k);
+    const rec = alerts.armed[k];
+    if (!rec) return;
+    if (rec.eventT <= Date.now()) { delete alerts.armed[k]; delete alerts.dismissed[k]; return; }
+    const fireAt = rec.eventT - (rec.leadMin || alerts.leadMin) * 60000;
+    let wait = fireAt - Date.now();
+    if (wait < 0) wait = 800;
+    const cap = 2147483647;
+    const slice = Math.min(wait, cap);
+    alertTimers.set(k, setTimeout(() => {
+      alertTimers.delete(k);
+      if (wait > cap) scheduleOne(k);
+      else showAlert(k);
+    }, slice));
+  }
+  function scheduleAll() {
+    for (const k of [...alertTimers.keys()]) clearAlertTimer(k);
+    for (const k of Object.keys(alerts.armed)) scheduleOne(k);
+    saveAlerts();
+    refreshAlertNote();
+  }
+  function reconcileAlerts() {
+    const now = Date.now();
+    for (const [k, rec] of Object.entries(alerts.armed)) {
+      if (!rec || rec.eventT <= now) { delete alerts.armed[k]; delete alerts.dismissed[k]; }
+    }
+    const byKey = new Map(passes.map(p => [keyOf(p), p]));
+    for (const [k, rec] of Object.entries(alerts.armed)) {
+      const p = byKey.get(k);
+      if (!p) continue;
+      const fresh = recordFromPass(p, rec.auto);
+      alerts.armed[k] = fresh;
+    }
+    if (!alerts.issAll) {
+      for (const [k, rec] of Object.entries(alerts.armed)) if (rec.auto) delete alerts.armed[k];
+    } else if (typeof Notification === 'function' && Notification.permission === 'granted') {
+      for (const p of passes) {
+        if (p.norad !== ISS_NORAD || !p.visible || passEvent(p) <= now) continue;
+        const k = keyOf(p);
+        if (alerts.dismissed[k] || alerts.armed[k]) continue;
+        alerts.armed[k] = recordFromPass(p, true);
+      }
+    }
+    scheduleAll();
+  }
+  function alertButtons(p) {
+    const k = keyOf(p), on = !!alerts.armed[k];
+    const when = p.visible ? 'it becomes visible' : 'rise';
+    const bellLabel = on
+      ? `Cancel alert for ${p.name}. Set for ${alerts.leadMin} min before ${when}.`
+      : `Notify me ${alerts.leadMin} minutes before ${p.name} ${when}`;
+    return `<span class="alertbtns"><button type="button" class="iconbtn bell${on ? ' on' : ''}" data-act="bell" data-key="${k}" aria-pressed="${on ? 'true' : 'false'}" aria-label="${esc(bellLabel)}" title="${esc(bellLabel)}">${BELL_SVG}</button><button type="button" class="iconbtn cal" data-act="cal" data-key="${k}" aria-label="${esc('Add ' + p.name + ' to calendar')}" title="Add to calendar">${CAL_SVG}</button></span>`;
+  }
+  function wireAlertButtons(root, p) {
+    root.querySelectorAll('button[data-act]').forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        if (btn.dataset.act === 'bell') toggleAlert(p);
+        else downloadIcs(p);
+      };
+    });
+  }
+  async function toggleAlert(p) {
+    const k = keyOf(p);
+    selKey = k; liveNorad = p.norad;
+    if ($('liveSat').querySelector(`option[value="${p.norad}"]`)) $('liveSat').value = String(p.norad);
+    if (alerts.armed[k]) {
+      if (alerts.issAll && alerts.armed[k].norad === ISS_NORAD) alerts.dismissed[k] = Date.now();
+      delete alerts.armed[k];
+      clearAlertTimer(k);
+      saveAlerts();
+      setAlertMsg('');
+      refreshAlertNote();
+      renderPasses();
+      return;
+    }
+    if (passEvent(p) <= Date.now()) { setAlertMsg('That pass has already begun.', true); renderPasses(); return; }
+    const ok = await ensurePermission();
+    if (!ok) { renderPasses(); return; }
+    delete alerts.dismissed[k];
+    alerts.armed[k] = recordFromPass(p, false);
+    saveAlerts();
+    scheduleOne(k);
+    refreshAlertNote();
+    const soon = passEvent(p) - alerts.leadMin * 60000 <= Date.now();
+    setAlertMsg(soon
+      ? `${p.name} is already inside the ${alerts.leadMin}-minute window, so the alert rings in a moment.`
+      : `Alert set for ${p.name}, ${alerts.leadMin} min before ${p.visible ? 'it becomes visible' : 'rise'}.`);
+    renderPasses();
+  }
+  function icsEscape(s) { return String(s).replace(/\\/g, '\\\\').replace(/\r?\n/g, '\\n').replace(/,/g, '\\,').replace(/;/g, '\\;'); }
+  function icsStamp(ms) {
+    const d = new Date(ms), p2 = n => String(n).padStart(2, '0');
+    return d.getUTCFullYear() + p2(d.getUTCMonth() + 1) + p2(d.getUTCDate()) + 'T' + p2(d.getUTCHours()) + p2(d.getUTCMinutes()) + p2(d.getUTCSeconds()) + 'Z';
+  }
+  function icsFold(line) {
+    let s = line, out = '';
+    while (s.length > 73) { out += s.slice(0, 73) + '\r\n'; s = ' ' + s.slice(73); }
+    return out + s;
+  }
+  function downloadIcs(p) {
+    const start = passEvent(p), end = Math.max(p.visible ? p.visible.end.t : p.set.t, start + 60000);
+    const lead = alerts.leadMin;
+    const summary = p.visible ? `${p.name} visible pass` : `${p.name} pass`;
+    const where = settings.obs.name || `${settings.obs.lat}, ${settings.obs.lon}`;
+    const desc = `${describePass(p)} Times are Eastern. https://satpass.lukedw09.workers.dev/`;
+    const lines = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//SatPass//lukedw09//EN',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      'BEGIN:VEVENT',
+      `UID:satpass-${p.norad}-${Math.round(p.rise.t / 1000)}@satpass.lukedw09.workers.dev`,
+      'DTSTAMP:' + icsStamp(Date.now()),
+      'DTSTART:' + icsStamp(start),
+      'DTEND:' + icsStamp(end),
+      'SUMMARY:' + icsEscape(summary),
+      'LOCATION:' + icsEscape(where),
+      'DESCRIPTION:' + icsEscape(desc),
+      'URL:https://satpass.lukedw09.workers.dev/',
+      'BEGIN:VALARM',
+      'ACTION:DISPLAY',
+      'DESCRIPTION:' + icsEscape(`${p.name} in ${lead} minutes`),
+      `TRIGGER:-PT${lead}M`,
+      'END:VALARM',
+      'END:VEVENT',
+      'END:VCALENDAR'
+    ];
+    const body = lines.map(icsFold).join('\r\n') + '\r\n';
+    const blob = new Blob([body], { type: 'text/calendar;charset=utf-8' });
+    const a = document.createElement('a');
+    const slug = p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'pass';
+    a.href = URL.createObjectURL(blob);
+    a.download = `satpass-${slug}-${icsStamp(start).slice(0, 8)}.ics`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  }
+  function bindAlerts() {
+    const lead = $('alertLead'), iss = $('alertIss');
+    if (!lead || !iss) return;
+    lead.value = String(alerts.leadMin);
+    iss.checked = alerts.issAll;
+    refreshAlertNote();
+    scheduleAll();
+    lead.onchange = () => {
+      const n = +lead.value;
+      alerts.leadMin = [5, 10, 15].includes(n) ? n : 10;
+      for (const rec of Object.values(alerts.armed)) rec.leadMin = alerts.leadMin;
+      scheduleAll();
+      setAlertMsg(`Reminders ring ${alerts.leadMin} minutes before the pass.`);
+      renderPasses();
+    };
+    iss.onchange = async () => {
+      if (iss.checked) {
+        const ok = await ensurePermission();
+        if (!ok) { iss.checked = false; alerts.issAll = false; saveAlerts(); return; }
+        alerts.issAll = true;
+        alerts.dismissed = {};
+        setAlertMsg('Visible ISS passes will ring ' + alerts.leadMin + ' min before they become visible.');
+      } else {
+        alerts.issAll = false;
+        alerts.dismissed = {};
+        setAlertMsg('');
+      }
+      reconcileAlerts();
+      renderPasses();
+    };
+    $('skyInfo').addEventListener('click', e => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      e.stopPropagation();
+      const p = passes.find(x => keyOf(x) === btn.dataset.key);
+      if (!p) return;
+      if (btn.dataset.act === 'bell') toggleAlert(p);
+      else downloadIcs(p);
+    });
+  }
 
   function renderPasses() {
     const tb = $('passTable').querySelector('tbody'); tb.innerHTML = '';
@@ -203,11 +485,12 @@
         <td>${T(p.rise.t)} <span class="sub">${C.compass(p.rise.az)}</span></td>
         <td>${T(p.max.t)} <b>${deg(p.max.el)}</b> <span class="sub">${C.compass(p.max.az)}</span></td>
         <td>${T(p.set.t)} <span class="sub">${C.compass(p.set.az)}</span></td>
-        <td>${dur(p.durationSec)}</td><td>${vis}</td>`;
+        <td>${dur(p.durationSec)}</td><td>${vis}</td><td class="alertcell">${alertButtons(p)}</td>`;
+      wireAlertButtons(tr, p);
       tr.onclick = () => { selKey = k; liveNorad = p.norad; $('liveSat').value = p.norad; renderPasses(); };
       tb.appendChild(tr);
     }
-    if (!list.length) tb.innerHTML = `<tr><td colspan="7" class="muted">No passes match. Try lowering the minimum elevation, adding days, or unticking “visible only”.</td></tr>`;
+    if (!list.length) tb.innerHTML = `<tr><td colspan="8" class="muted">No passes match. Try lowering the minimum elevation, adding days, or unticking “visible only”.</td></tr>`;
     drawSky();
   }
 
@@ -256,7 +539,8 @@
       <div><b>Duration</b>${dur(p.durationSec)}</div>
       <div><b>Range at max</b>${Math.round(p.max.range).toLocaleString()} km</div>
       <div><b>Sun at max</b>${deg(p.sunElAtMax, 1)}</div>
-      <div style="grid-column:1/-1"><b>Naked-eye visibility</b>${v ? `Visible ${T(v.start.t)} (${deg(v.start.el)} ${C.compass(v.start.az)}) → max ${deg(v.max.el)} ${C.compass(v.max.az)} → ${T(v.end.t)} (${deg(v.end.el)} ${C.compass(v.end.az)})${v.end.t < p.set.t - 20000 && !p.set.lit ? ', then fades into Earth’s shadow' : ''}` : 'Not visible: ' + (p.sunElAtMax > settings.sunMax ? 'sky too bright (sun above ' + settings.sunMax + '°)' : 'satellite in Earth’s shadow or below 10°')}</div>`;
+      <div style="grid-column:1/-1"><b>Naked-eye visibility</b>${v ? `Visible ${T(v.start.t)} (${deg(v.start.el)} ${C.compass(v.start.az)}) → max ${deg(v.max.el)} ${C.compass(v.max.az)} → ${T(v.end.t)} (${deg(v.end.el)} ${C.compass(v.end.az)})${v.end.t < p.set.t - 20000 && !p.set.lit ? ', then fades into Earth’s shadow' : ''}` : 'Not visible: ' + (p.sunElAtMax > settings.sunMax ? 'sky too bright (sun above ' + settings.sunMax + '°)' : 'satellite in Earth’s shadow or below 10°')}</div>
+      <div class="remind" style="grid-column:1/-1">${alertButtons(p)}<span class="when">${alerts.leadMin} min before ${p.visible ? 'it becomes visible' : 'rise'}</span></div>`;
   }
 
   // ---------- live + map ----------
@@ -368,6 +652,7 @@
 
   function init() {
     bindInputs();
+    bindAlerts();
     let deb; ['obsLat', 'obsLon', 'obsElev', 'obsName'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(readObs, 500); }));
     ['optDays', 'optMinEl', 'optSun'].forEach(id => $(id).addEventListener('change', readOpts));
     $('optVisOnly').addEventListener('change', readOpts);
