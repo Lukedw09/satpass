@@ -42,6 +42,20 @@
       <label class="check"><input id="optVisOnly" type="checkbox"> Visible (naked-eye) passes only</label>
     </section>
 
+    <section class="card" id="alertCard">
+      <h2>Alerts</h2>
+      <label>Remind me
+        <select id="alertLead">
+          <option value="5">5 min before</option>
+          <option value="10">10 min before</option>
+          <option value="15">15 min before</option>
+        </select>
+      </label>
+      <label class="check"><input id="alertIss" type="checkbox"> Notify me for all visible ISS passes</label>
+      <p id="alertNote" class="hint">Alerts work while SatPass is open (or installed and running). Add to calendar for a phone reminder that still works when this tab is closed.</p>
+      <div id="alertMsg" class="hint"></div>
+    </section>
+
     <section class="card">
       <h2>Satellites</h2>
       <ul id="satList" class="satlist"></ul>
@@ -63,7 +77,7 @@
       <div class="tablewrap">
         <table id="passTable">
           <thead><tr>
-            <th>Date</th><th>Satellite</th><th>Rise</th><th>Max</th><th>Set</th><th>Dur</th><th>Visible window</th>
+            <th>Date</th><th>Satellite</th><th>Rise</th><th>Max</th><th>Set</th><th>Dur</th><th>Visible window</th><th class="alertcol"><span class="sr">Remind</span></th>
           </tr></thead>
           <tbody></tbody>
         </table>
