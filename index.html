@@ -107,7 +107,10 @@
       </div>
       <div class="card">
         <div class="cardhead"><h2>Live now</h2>
-          <select id="liveSat"></select>
+          <span class="livehead">
+            <button type="button" id="findBtn" class="ghost">Find it</button>
+            <select id="liveSat"></select>
+          </span>
         </div>
         <div id="live" class="live"></div>
         <canvas id="map" width="720" height="360"></canvas>
@@ -120,6 +123,32 @@
 <footer>
   Orbits: <a href="https://celestrak.org/" target="_blank" rel="noopener">CelesTrak</a> GP element sets · SGP4 via <a href="https://github.com/shashwatak/satellite-js" target="_blank" rel="noopener">satellite.js</a> · Cloud cover: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a> · Coastlines: Natural Earth · Times in <span id="tzLabel">America/New_York</span> · <a href="https://github.com/Lukedw09/satpass" target="_blank" rel="noopener">source</a>
 </footer>
+
+<div id="finder" class="finder" hidden>
+  <video id="finderCam" playsinline autoplay muted></video>
+  <div class="finder-shade"></div>
+  <div class="finder-top">
+    <button type="button" id="finderClose" class="ghost">Close</button>
+    <div id="finderName" class="finder-name">Find it</div>
+    <button type="button" id="finderCamBtn" class="ghost">Camera</button>
+  </div>
+  <div id="finderArrow" class="finder-arrow" hidden><i></i></div>
+  <div id="finderCross" class="finder-cross"></div>
+  <div id="finderCue" class="finder-cue"></div>
+  <div id="finderRead" class="finder-read"></div>
+  <div id="finderCal" class="finder-cal" hidden>Wave the phone in a figure-8 to calibrate the compass.</div>
+  <div id="finderGate" class="finder-gate">
+    <p id="finderGateMsg"></p>
+    <button type="button" id="finderEnable">Enable compass</button>
+  </div>
+  <div id="finderDemo" class="finder-demo" hidden>
+    <span>Desktop emulation</span>
+    <button type="button" id="demoOff" class="ghost">Off target</button>
+    <button type="button" id="demoOn" class="ghost">On target</button>
+    <button type="button" id="demoLand" class="ghost">Landscape</button>
+    <button type="button" id="demoCal" class="ghost">Compass hint</button>
+  </div>
+</div>
 
 <script src="vendor/satellite.min.js"></script>
 <script src="data/fallback-tle.js"></script>

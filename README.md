@@ -66,6 +66,16 @@ The line uses the legend under the chart:
 
 A circle is rise, a diamond is the highest point, and a square is set. During a pass that is happening now, a green dot marks where it is. Move the pointer along the arc and the chart shows the magnitude at that spot, or `—` when that object has no standard magnitude. Under the chart: duration, peak magnitude, distance at the highest point, and the Sun's altitude then. If the satellite enters shadow before it sets, the note says it fades into Earth's shadow.
 
+## Find it
+
+**Find it**, on a pass row or next to **Live now**, opens a full-screen pointer. Hold the phone so the rear camera faces the sky. A crosshair is where the phone is aimed. An arrow points toward the satellite, and the line under it says how far to turn and tilt, such as `Turn right 40° · tilt up 15°`. Within about 5° the crosshair turns green, the line says **On target**, and the phone vibrates once if it can.
+
+The view also says whether the satellite is sunlit or in shadow, whether it is above the horizon, and its magnitude (or an em dash when SatPass has no standard brightness). If it is still below the horizon, the line says so and gives the next rise.
+
+iPhone asks for motion access only after you tap **Enable compass**. A compass that needs calibrating asks you to wave the phone in a figure-8. A computer with no compass says so instead of pretending to point. **Camera** shows the rear camera behind the pointer. The picture stays on the phone: nothing is recorded or uploaded.
+
+The compass heading is magnetic on iPhones. SatPass adds magnetic declination from a degree-6 truncation of the public World Magnetic Model 2025, so the arrow is in true azimuth. That correction is about a degree off the full model in ordinary latitudes, which is smaller than the wobble of a phone compass.
+
 **Live now**, next to the chart, updates every second with direction, elevation, distance, height, speed, and whether the satellite is sunlit. The map draws its ground track from 45 minutes ago through 90 minutes ahead, the region where it is above the horizon, your location, and the night side of Earth.
 
 ## What "visible" means
@@ -116,4 +126,4 @@ A fresh element set is usually good to about a kilometer, which is close enough 
 
 "Visible" is still geometry: dark sky, sunlit satellite, at least 10° up. The magnitude is a separate estimate and can be off by about a magnitude when the satellite is tumbling or the sky is hazy. Terrain is ignored, so a hill or a building can hide a low pass. Atmospheric refraction is ignored too; it lifts an object on the horizon by about half a degree and shifts rise or set by a few seconds. Times are always Eastern, whatever time zone you are standing in.
 
-To run a copy yourself, open `index.html` in a browser. `node --test` runs the magnitude, train, and cloud checks. MIT License © 2026 Luke de Wet. Orbits from [CelesTrak](https://celestrak.org/). Predictions use [satellite.js](https://github.com/shashwatak/satellite-js) (MIT). Cloud cover from [Open-Meteo](https://open-meteo.com/). Coastlines from [Natural Earth](https://www.naturalearthdata.com/).
+To run a copy yourself, open `index.html` in a browser. Find it needs HTTPS, which the hosted site already has. `node --test` runs the magnitude, train, cloud, and pointing checks. MIT License © 2026 Luke de Wet. Orbits from [CelesTrak](https://celestrak.org/). Predictions use [satellite.js](https://github.com/shashwatak/satellite-js) (MIT). Cloud cover from [Open-Meteo](https://open-meteo.com/). Coastlines from [Natural Earth](https://www.naturalearthdata.com/).

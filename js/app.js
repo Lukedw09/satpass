@@ -479,13 +479,14 @@
     const bellLabel = on
       ? `Cancel alert for ${p.name}. Set for ${alerts.leadMin} min before ${when}.`
       : `Notify me ${alerts.leadMin} minutes before ${p.name} ${when}`;
-    return `<span class="alertbtns"><button type="button" class="iconbtn bell${on ? ' on' : ''}" data-act="bell" data-key="${k}" aria-pressed="${on ? 'true' : 'false'}" aria-label="${esc(bellLabel)}" title="${esc(bellLabel)}">${BELL_SVG}</button><button type="button" class="iconbtn cal" data-act="cal" data-key="${k}" aria-label="${esc('Add ' + p.name + ' to calendar')}" title="Add to calendar">${CAL_SVG}</button></span>`;
+    return `<span class="alertbtns"><button type="button" class="iconbtn find" data-act="find" data-key="${k}" aria-label="${esc('Find ' + p.name + ' in the sky')}" title="Find it">Find</button><button type="button" class="iconbtn bell${on ? ' on' : ''}" data-act="bell" data-key="${k}" aria-pressed="${on ? 'true' : 'false'}" aria-label="${esc(bellLabel)}" title="${esc(bellLabel)}">${BELL_SVG}</button><button type="button" class="iconbtn cal" data-act="cal" data-key="${k}" aria-label="${esc('Add ' + p.name + ' to calendar')}" title="Add to calendar">${CAL_SVG}</button></span>`;
   }
   function wireAlertButtons(root, p) {
     root.querySelectorAll('button[data-act]').forEach(btn => {
       btn.onclick = e => {
         e.stopPropagation();
         if (btn.dataset.act === 'bell') toggleAlert(p);
+        else if (btn.dataset.act === 'find') openFinder(p.norad);
         else downloadIcs(p);
       };
     });
@@ -604,6 +605,7 @@
       const p = passes.find(x => keyOf(x) === btn.dataset.key);
       if (!p) return;
       if (btn.dataset.act === 'bell') toggleAlert(p);
+      else if (btn.dataset.act === 'find') openFinder(p.norad);
       else downloadIcs(p);
     });
   }
@@ -863,6 +865,227 @@
     drawMap(sat);
   }
 
+  // ---------- find it ----------
+  const findDemo = /(?:^|[?&])findDemo=1(?:&|$)/.test(location.search);
+  let finderNorad = null, finderTimer = 0, finderListening = false, finderOn = false, finderCam = null;
+  let simOrient = null, lastReading = null, simLandscape = false, sawAbsolute = false;
+
+  function screenAngle() {
+    let angle = 0;
+    try {
+      if (screen.orientation && typeof screen.orientation.angle === 'number') angle = screen.orientation.angle;
+      else if (typeof window.orientation === 'number') angle = window.orientation;
+    } catch { /* a locked iframe */ }
+    if (simLandscape) angle = 90;
+    return angle;
+  }
+
+  function decimalYear(date) {
+    const y = date.getUTCFullYear();
+    const a = Date.UTC(y, 0, 1), b = Date.UTC(y + 1, 0, 1);
+    return y + (date.getTime() - a) / (b - a);
+  }
+  function currentMagnitude(sat, st) {
+    if (!st || st.el <= 0 || !st.lit || sat.mStd == null || !window.satellite) return null;
+    const when = new Date();
+    const gd = C.observerGd(settings.obs);
+    const l = C.look(sat, when, gd);
+    if (!l) return null;
+    const rs = window.satellite.sunPos(window.satellite.jday(when)).rsun;
+    const sun = { x: rs.x * 149597870.7, y: rs.y * 149597870.7, z: rs.z * 149597870.7 };
+    const obs = C.observerEci(gd, l.gmst);
+    const range = Math.hypot(l.eci.x - obs.x, l.eci.y - obs.y, l.eci.z - obs.z);
+    return C.visualMagnitude(sat.mStd, range, C.phaseAngle(l.eci, sun, obs), l.el);
+  }
+
+  function aimFromReading(ev) {
+    const look = C.phoneLook(ev.alpha || 0, ev.beta || 0, ev.gamma || 0);
+    const decl = C.magneticDeclination(settings.obs.lat, settings.obs.lon, decimalYear(new Date()));
+    let az = look.az, magnetic = false;
+    if (typeof ev.webkitCompassHeading === 'number' && !Number.isNaN(ev.webkitCompassHeading)) {
+      const base = C.trueAzimuth(ev.webkitCompassHeading, decl);
+      const alphaAz = ((-(ev.alpha || 0)) % 360 + 360) % 360;
+      az = (base + C.wrapSigned(look.az - alphaAz) + 360) % 360;
+      magnetic = true;
+    }
+    const acc = ev.webkitCompassAccuracy;
+    const calibrate = typeof acc === 'number' && (acc < 0 || acc > 25);
+    return { az, el: look.el, magnetic, calibrate };
+  }
+
+  function paintFinder() {
+    const root = $('finder');
+    if (!root || root.hidden) return;
+    const sat = satObjs.get(finderNorad);
+    if (!sat) { $('finderCue').textContent = 'That satellite has no orbit loaded.'; return; }
+    const st = C.stateNow(sat, settings.obs);
+    if (!st) { $('finderCue').textContent = 'Propagation failed for this satellite.'; return; }
+    $('finderName').textContent = sat.name;
+    const reading = simOrient || lastReading;
+    if (!reading) return;
+    const aim = aimFromReading(reading);
+    const off = C.pointingOffset(aim.az, aim.el, st.az, st.el);
+    const screen = C.deviceToScreen(off.dAz, off.dEl, screenAngle());
+    const arrow = $('finderArrow');
+    const on = off.onTarget;
+    if (on && !finderOn && navigator.vibrate) { try { navigator.vibrate(40); } catch { /* some browsers refuse */ } }
+    finderOn = on;
+    root.classList.toggle('on', on);
+    const cue = on ? 'On target'
+      : (st.el <= 0 && off.separation < C.ON_TARGET_DEG) ? 'Below the horizon'
+      : (C.pointingCue(off.dAz, off.dEl) || 'Hold steady') + (st.el <= 0 ? ' · below the horizon' : '');
+    if (on) arrow.hidden = true;
+    else {
+      const len = Math.min(18, 7 + off.separation * 0.28);
+      const ang = Math.atan2(screen.x, screen.y) * 180 / Math.PI;
+      arrow.hidden = false;
+      arrow.style.transform = `rotate(${ang}deg)`;
+      arrow.querySelector('i').style.height = len + 'vh';
+      if (off.separation < C.ON_TARGET_DEG) arrow.hidden = true;
+    }
+    $('finderCue').textContent = cue;
+    $('finderCal').hidden = !aim.calibrate;
+    const mag = currentMagnitude(sat, st);
+    const magTxt = mag == null ? '—' : mag.toFixed(1) + (sat.magApprox ? ' approx' : '');
+    const next = passes.find(p => p.norad === sat.norad && p.rise.t > Date.now());
+    const rise = st.el > 0 ? 'Above the horizon' : (next ? `Rises ${fmtDate.format(new Date(next.rise.t))} ${fmtHM.format(new Date(next.rise.t))} ${C.compass(next.rise.az)}` : 'No rise in this window');
+    $('finderRead').innerHTML = `<div><b>Pointing</b>${Math.round(aim.az)}° ${aim.el.toFixed(0)}°</div><div><b>Satellite</b>${Math.round(st.az)}° ${st.el.toFixed(0)}°</div><div><b>Light</b>${st.el <= 0 ? 'below horizon' : (st.lit ? 'sunlit' : 'in shadow')}</div><div><b>Mag</b>${magTxt}</div><div style="grid-column:span 2"><b>Where</b>${esc(rise)}</div>`;
+  }
+
+  function onOrientation(ev) {
+    if (simOrient) return;
+    if (ev.absolute) sawAbsolute = true;
+    if (sawAbsolute && !ev.absolute && ev.webkitCompassHeading == null) return;
+    lastReading = ev;
+    paintFinder();
+  }
+
+  function startFinderListen() {
+    if (finderListening) return;
+    finderListening = true;
+    window.addEventListener('deviceorientationabsolute', onOrientation, true);
+    window.addEventListener('deviceorientation', onOrientation, true);
+    finderTimer = setInterval(paintFinder, 200);
+  }
+  function stopFinderListen() {
+    finderListening = false;
+    sawAbsolute = false;
+    window.removeEventListener('deviceorientationabsolute', onOrientation, true);
+    window.removeEventListener('deviceorientation', onOrientation, true);
+    clearInterval(finderTimer);
+  }
+
+  async function openFinder(norad) {
+    finderNorad = norad;
+    finderOn = false;
+    const root = $('finder');
+    root.hidden = false;
+    root.classList.remove('on');
+    $('finderDemo').hidden = !findDemo;
+    $('finderCal').hidden = true;
+    const DOE = window.DeviceOrientationEvent;
+    if (findDemo) {
+      $('finderGate').hidden = true;
+      const sat = satObjs.get(norad);
+      const st = sat && C.stateNow(sat, settings.obs);
+      const base = st || { az: 0, el: 30 };
+      simOrient = { ...C.aimOrientation(base.az - 40, base.el - 15), demo: true };
+      startFinderListen();
+      paintFinder();
+      return;
+    }
+    if (!DOE) {
+      $('finderGate').hidden = false;
+      $('finderEnable').hidden = true;
+      $('finderGateMsg').textContent = 'This browser has no orientation sensors. Find it needs a phone with a compass and a tilt sensor.';
+      return;
+    }
+    $('finderEnable').hidden = false;
+    $('finderGateMsg').textContent = 'Hold the phone up and turn until the arrow sits on the crosshair. The compass is requested only after you tap Enable compass.';
+    $('finderGate').hidden = typeof DOE.requestPermission !== 'function';
+    if (typeof DOE.requestPermission !== 'function') {
+      startFinderListen();
+      setTimeout(() => {
+        if ($('finder').hidden || simOrient) return;
+        $('finderGate').hidden = false;
+        $('finderEnable').hidden = true;
+        $('finderGateMsg').textContent = 'No orientation data arrived. Find it needs a phone with a compass. Desktop browsers usually do not have one.';
+      }, 2500);
+    }
+  }
+
+  async function enableCompass() {
+    const DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === 'function') {
+      try {
+        const res = await DOE.requestPermission();
+        if (res !== 'granted') {
+          $('finderGateMsg').textContent = 'Compass permission was denied. Allow motion and orientation access for this site, then try again.';
+          return;
+        }
+      } catch {
+        $('finderGateMsg').textContent = 'The compass permission request failed. Open SatPass over HTTPS and try the button again.';
+        return;
+      }
+    }
+    $('finderGate').hidden = true;
+    startFinderListen();
+  }
+
+  function closeFinder() {
+    $('finder').hidden = true;
+    $('finder').classList.remove('on', 'cam');
+    stopFinderListen();
+    simOrient = null;
+    if (finderCam) {
+      for (const t of finderCam.getTracks()) t.stop();
+      finderCam = null;
+      $('finderCam').srcObject = null;
+    }
+  }
+
+  async function toggleCamera() {
+    const video = $('finderCam');
+    if (finderCam) { closeCam(); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      $('finderCue').textContent = 'This browser has no camera.';
+      return;
+    }
+    try {
+      finderCam = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' } } });
+      video.srcObject = finderCam;
+      $('finder').classList.add('cam');
+      $('finderCamBtn').textContent = 'Camera off';
+    } catch {
+      $('finderCue').textContent = 'Camera permission was denied. The pointer still works without it.';
+    }
+  }
+  function closeCam() {
+    if (finderCam) { for (const t of finderCam.getTracks()) t.stop(); finderCam = null; }
+    $('finderCam').srcObject = null;
+    $('finder').classList.remove('cam');
+    $('finderCamBtn').textContent = 'Camera';
+  }
+
+  function bindFinder() {
+    $('findBtn').onclick = () => openFinder(liveNorad);
+    $('finderClose').onclick = closeFinder;
+    $('finderEnable').onclick = enableCompass;
+    $('finderCamBtn').onclick = toggleCamera;
+    if (!findDemo) return;
+    const setAim = (dAz, dEl) => {
+      const sat = satObjs.get(finderNorad);
+      const st = sat && C.stateNow(sat, settings.obs);
+      const base = st || { az: 0, el: 40 };
+      simOrient = { ...C.aimOrientation(base.az + dAz, Math.max(-80, Math.min(85, base.el + dEl))), demo: true };
+      paintFinder();
+    };
+    $('demoOff').onclick = () => setAim(-40, -15);
+    $('demoOn').onclick = () => setAim(0, 0);
+    $('demoLand').onclick = () => { simLandscape = !simLandscape; $('demoLand').textContent = simLandscape ? 'Portrait' : 'Landscape'; paintFinder(); };
+    $('demoCal').onclick = () => { if (simOrient) simOrient.webkitCompassAccuracy = -1; paintFinder(); };
+  }
+
   // ---------- controls ----------
   function bindInputs() {
     const o = settings.obs;
@@ -967,6 +1190,7 @@
     bindInputs();
     bindAlerts();
     bindSkyHover();
+    bindFinder();
     let deb, magDeb;
     ['obsLat', 'obsLon', 'obsElev', 'obsName'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(readObs, 500); }));
     ['optDays', 'optMinEl', 'optSun'].forEach(id => $(id).addEventListener('change', readOpts));

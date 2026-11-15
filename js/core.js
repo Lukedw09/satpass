@@ -444,9 +444,158 @@
     };
   }
 
+  /** Shortest signed angle from `fromDeg` to `toDeg`, in (-180, 180]. Positive is clockwise. */
+  function wrapSigned(deg) {
+    const d = ((deg % 360) + 360) % 360;
+    return d > 180 ? d - 360 : d;
+  }
+
+  function trueAzimuth(magneticDeg, declinationEast) {
+    return ((magneticDeg + declinationEast) % 360 + 360) % 360;
+  }
+
+  /**
+   * Direction out the back of the phone (the rear camera), from a DeviceOrientation reading.
+   * alpha/beta/gamma are the W3C degrees. Azimuth is degrees clockwise from true north when
+   * alpha is absolute; elevation is degrees above the horizon.
+   * The rotation is Rz(alpha) Rx(beta) Ry(gamma) applied to (0, 0, -1), which matches the
+   * compass heading in the W3C orientation-event worked example.
+   */
+  function phoneLook(alphaDeg, betaDeg, gammaDeg) {
+    const a = (alphaDeg || 0) * RAD, b = (betaDeg || 0) * RAD, g = (gammaDeg || 0) * RAD;
+    const cy = Math.cos(g), sy = Math.sin(g);
+    const cx = Math.cos(b), sx = Math.sin(b);
+    const cz = Math.cos(a), sz = Math.sin(a);
+    const east = -cz * sy - sz * sx * cy;
+    const north = -sz * sy + cz * sx * cy;
+    const up = -cx * cy;
+    const az = (Math.atan2(east, north) * DEG + 360) % 360;
+    const el = Math.atan2(up, Math.hypot(east, north)) * DEG;
+    return { az, el };
+  }
+
+  /** alpha/beta/gamma that aim the rear camera at this azimuth and elevation, with no roll. */
+  function aimOrientation(azDeg, elDeg) {
+    const beta = elDeg + 90;
+    const alpha = (360 - ((azDeg % 360) + 360) % 360) % 360;
+    return { alpha, beta, gamma: 0 };
+  }
+
+  function angularSeparation(az1, el1, az2, el2) {
+    const p1 = el1 * RAD, p2 = el2 * RAD, dl = (az2 - az1) * RAD;
+    const c = Math.sin(p1) * Math.sin(p2) + Math.cos(p1) * Math.cos(p2) * Math.cos(dl);
+    return Math.acos(Math.min(1, Math.max(-1, c))) * DEG;
+  }
+
+  const ON_TARGET_DEG = 5;
+
+  /**
+   * How to move the phone onto the satellite.
+   * dAz > 0 means turn right. dEl > 0 means tilt up. separation is the great-circle angle.
+   */
+  function pointingOffset(phoneAz, phoneEl, satAz, satEl) {
+    const dAz = wrapSigned(satAz - phoneAz);
+    const dEl = satEl - phoneEl;
+    const separation = angularSeparation(phoneAz, phoneEl, satAz, satEl);
+    return { dAz, dEl, separation, onTarget: separation <= ON_TARGET_DEG && satEl > 0 };
+  }
+
+  /**
+   * Rotate a device-plane offset into the visual viewport.
+   * deviceRight > 0 is toward the right edge of the phone. deviceUp > 0 is toward the top edge.
+   * screenAngleDeg is screen.orientation.angle (clockwise from the natural orientation):
+   * 0 portrait, 90 or -90 the two landscapes, 180 upside down.
+   * Returns x to the right on the screen and y toward the top of the screen.
+   */
+  function deviceToScreen(deviceRight, deviceUp, screenAngleDeg) {
+    const a = ((((screenAngleDeg || 0) % 360) + 360) % 360) * RAD;
+    return {
+      x: deviceRight * Math.cos(a) - deviceUp * Math.sin(a),
+      y: deviceRight * Math.sin(a) + deviceUp * Math.cos(a)
+    };
+  }
+
+  function pointingCue(dAz, dEl) {
+    const parts = [];
+    const az = Math.round(dAz), el = Math.round(dEl);
+    if (Math.abs(az) >= 1) parts.push(`Turn ${az > 0 ? 'right' : 'left'} ${Math.abs(az)}°`);
+    if (Math.abs(el) >= 1) parts.push(`tilt ${el > 0 ? 'up' : 'down'} ${Math.abs(el)}°`);
+    return parts.join(' · ');
+  }
+
+  /*
+   * Magnetic declination, degrees east of true north.
+   * Truncation of the public-domain World Magnetic Model 2025 (degree and order 6 of the
+   * published degree-12 model), epoch 2025.0, plus that file's secular-variation terms.
+   * Coefficients: NOAA/NCEI and the British Geological Survey, WMM2025.
+   * https://www.ncei.noaa.gov/products/world-magnetic-model
+   * A phone compass is coarser than the degree or so this truncation misses in the mid-latitudes.
+   * It is not the full WMM and it is not for navigation near the magnetic poles.
+   * Lines are n, m, g, h, g-dot, h-dot (nT, nT/year).
+   */
+  const WMM2025_N6 = [
+    [1, 0, -29351.8, 0, 12.0, 0], [1, 1, -1410.8, 4545.4, 9.7, -21.5],
+    [2, 0, -2556.6, 0, -11.6, 0], [2, 1, 2951.1, -3133.6, -5.2, -27.7], [2, 2, 1649.3, -815.1, -8.0, -12.1],
+    [3, 0, 1361.0, 0, -1.3, 0], [3, 1, -2404.1, -56.6, -4.2, 4.0], [3, 2, 1243.8, 237.5, 0.4, -0.3], [3, 3, 453.6, -549.5, -15.6, -4.1],
+    [4, 0, 895.0, 0, -1.6, 0], [4, 1, 799.5, 278.6, -2.4, -1.1], [4, 2, 55.7, -133.9, -6.0, 4.1], [4, 3, -281.1, 212.0, 5.6, 1.6], [4, 4, 12.1, -375.6, -7.0, -4.4],
+    [5, 0, -233.2, 0, 0.6, 0], [5, 1, 368.9, 45.4, 1.4, -0.5], [5, 2, 187.2, 220.2, 0, 2.2], [5, 3, -138.7, -122.9, 0.6, 0.4], [5, 4, -142.0, 43.0, 2.2, 1.7], [5, 5, 20.9, 106.1, 0.9, 1.9],
+    [6, 0, 64.4, 0, -0.2, 0], [6, 1, 63.8, -18.4, -0.4, 0.3], [6, 2, 76.9, 16.8, 0.9, -1.6], [6, 3, -115.7, 48.8, 1.2, -0.4], [6, 4, -40.9, -59.8, -0.9, 0.9], [6, 5, 14.9, 10.9, 0.3, 0.7], [6, 6, -60.7, 72.7, 0.9, 0.9]
+  ];
+
+  function wmmFact(n) { let f = 1; for (let i = 2; i <= n; i++) f *= i; return f; }
+
+  function magneticDeclination(latDeg, lonDeg, year) {
+    const N = 6;
+    const dt = year - 2025;
+    const g = Array.from({ length: N + 1 }, () => Array(N + 1).fill(0));
+    const h = Array.from({ length: N + 1 }, () => Array(N + 1).fill(0));
+    for (const [n, m, gv, hv, dg, dh] of WMM2025_N6) { g[n][m] = gv + dg * dt; h[n][m] = hv + dh * dt; }
+    const schmidt = (n, m) => m === 0 ? 1 : Math.sqrt(2 * wmmFact(n - m) / wmmFact(n + m));
+    const a = 6378.137, f = 1 / 298.257223563, b = a * (1 - f);
+    const lat = latDeg * RAD, lon = lonDeg * RAD;
+    const sl = Math.sin(lat), cl = Math.cos(lat);
+    const rc = a * a / Math.sqrt(a * a * cl * cl + b * b * sl * sl);
+    const xx = rc * cl, zz = rc * (b * b) / (a * a) * sl;
+    const r = Math.hypot(xx, zz);
+    const colat = Math.atan2(xx, zz);
+    const st = Math.sin(colat), ct = Math.cos(colat);
+    const P = Array.from({ length: N + 1 }, () => Array(N + 1).fill(0));
+    const dPdx = Array.from({ length: N + 1 }, () => Array(N + 1).fill(0));
+    P[0][0] = 1;
+    for (let m = 1; m <= N; m++) P[m][m] = (2 * m - 1) * st * P[m - 1][m - 1];
+    for (let m = 0; m <= N; m++) {
+      if (m + 1 <= N) P[m + 1][m] = (2 * m + 1) * ct * P[m][m];
+      for (let n = m + 2; n <= N; n++) P[n][m] = ((2 * n - 1) * ct * P[n - 1][m] - (n + m - 1) * P[n - 2][m]) / (n - m);
+    }
+    for (let n = 1; n <= N; n++) for (let m = 0; m <= n; m++) {
+      const prev = n - 1 >= m ? P[n - 1][m] : 0;
+      const den = 1 - ct * ct;
+      dPdx[n][m] = den === 0 ? 0 : (-n * ct * P[n][m] + (n + m) * prev) / den;
+    }
+    const ar = 6371.2 / r;
+    let Br = 0, Bt = 0, Bp = 0;
+    for (let n = 1; n <= N; n++) {
+      const arn = ar ** (n + 2);
+      for (let m = 0; m <= n; m++) {
+        const S = schmidt(n, m);
+        const Ps = S * P[n][m];
+        const dPdth = S * (-st) * dPdx[n][m];
+        const c = Math.cos(m * lon), s = Math.sin(m * lon);
+        const gh = g[n][m] * c + h[n][m] * s;
+        Br += (n + 1) * arn * gh * Ps;
+        Bt += arn * gh * dPdth;
+        if (st !== 0) Bp += arn * m * (g[n][m] * s - h[n][m] * c) * Ps / st;
+      }
+    }
+    const delta = lat - (Math.PI / 2 - colat);
+    const north = Bt * Math.cos(delta) - Br * Math.sin(delta);
+    return Math.atan2(Bp, north) * DEG;
+  }
+
   root.SatCore = {
     parseTLE, makeSat, makeSatFromOmm, findPasses, stateNow, groundTrack, subSolar, compass, sunElevation, observerGd, look,
     observerEci, phaseAngle, airmass, visualMagnitude, standardMagnitude, launchPrefix, detectTrains, nearestCloud, cloudKind,
-    EXTINCTION_PER_AIRMASS, AIRMASS_EL_FLOOR_DEG, STARLINK_MSTD
+    wrapSigned, trueAzimuth, phoneLook, aimOrientation, pointingOffset, deviceToScreen, pointingCue, magneticDeclination, angularSeparation,
+    EXTINCTION_PER_AIRMASS, AIRMASS_EL_FLOOR_DEG, STARLINK_MSTD, ON_TARGET_DEG
   };
 })(typeof window !== 'undefined' ? window : globalThis);
