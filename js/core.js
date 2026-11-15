@@ -1,4 +1,4 @@
-/* SatPass core: TLE parsing, look angles, sun/shadow, pass search.
+/* SatPass core: TLE parsing, look angles, sun/shadow, pass search, visual magnitude, trains.
    Plain script; needs globalThis.satellite (vendor/satellite.min.js). Exposes globalThis.SatCore. */
 (function (root) {
   'use strict';
@@ -126,7 +126,12 @@
     const d = new Date(t), l = look(sat, d, gd);
     if (!l) return null;
     const lit = isSunlit(l.eci, d), sunEl = sunElevation(d, gd);
-    return { t, az: l.az, el: l.el, range: l.range, lit, sunEl, vis: lit && sunEl < sunMax && l.el >= visMinEl };
+    const obs = observerEci(gd, l.gmst);
+    const sun = sunEci(d);
+    const range = Math.hypot(l.eci.x - obs.x, l.eci.y - obs.y, l.eci.z - obs.z);
+    const phase = phaseAngle(l.eci, sun, obs);
+    const mag = (lit && l.el > 0 && sat.mStd != null) ? visualMagnitude(sat.mStd, range, phase, l.el) : null;
+    return { t, az: l.az, el: l.el, range, lit, sunEl, mag, phase, vis: lit && sunEl < sunMax && l.el >= visMinEl };
   }
 
   function buildPass(sat, gd, riseT, maxT, setT, { sunMax, visMinEl }) {
@@ -154,9 +159,12 @@
       const peak = (max.vis || (maxT >= visPts[0].t && maxT <= visPts[visPts.length - 1].t)) ? max : vmax;
       visible = { start: visPts[0], max: peak, end: visPts[visPts.length - 1] };
     }
+    const magPts = track.filter(p => p.vis && p.mag != null);
+    if (visible) for (const p of [visible.start, visible.max, visible.end]) if (p && p.mag != null) magPts.push(p);
+    const peakMag = magPts.length ? magPts.reduce((a, p) => Math.min(a, p.mag), Infinity) : null;
     return {
       norad: sat.norad, name: sat.name, rise, max, set,
-      durationSec: (setT - riseT) / 1000, track, visible,
+      durationSec: (setT - riseT) / 1000, track, visible, peakMag,
       sunElAtMax: max.sunEl, sunlitAtMax: max.lit
     };
   }
@@ -191,5 +199,254 @@
     return { lat, lon };
   }
 
-  root.SatCore = { parseTLE, makeSat, findPasses, stateNow, groundTrack, subSolar, compass, sunElevation, observerGd, look };
+  function makeSatFromOmm(omm) {
+    const satrec = S.json2satrec(omm);
+    if (!satrec || satrec.error) throw new Error('Bad elements for ' + (omm.OBJECT_NAME || omm.NORAD_CAT_ID));
+    const epochMs = ((satrec.jdsatepoch + (satrec.jdsatepochF || 0)) - 2440587.5) * 86400000;
+    const periodMin = (2 * Math.PI) / satrec.no;
+    const norad = +omm.NORAD_CAT_ID;
+    const name = String(omm.OBJECT_NAME || ('NORAD ' + norad)).trim();
+    return {
+      name, norad, omm, satrec, epoch: new Date(epochMs), periodMin,
+      objectId: omm.OBJECT_ID, meanMotion: omm.MEAN_MOTION, meanAnomaly: omm.MEAN_ANOMALY
+    };
+  }
+
+  // WGS-84, same ellipsoid satellite.js uses in geodeticToEcf (not exported by the vendored build).
+  function observerEcf(gd) {
+    const a = 6378.137, f = 1 / 298.257223563, e2 = 2 * f - f * f;
+    const lat = gd.latitude, lon = gd.longitude, h = gd.height || 0;
+    const sl = Math.sin(lat), cl = Math.cos(lat);
+    const n = a / Math.sqrt(1 - e2 * sl * sl);
+    return {
+      x: (n + h) * cl * Math.cos(lon),
+      y: (n + h) * cl * Math.sin(lon),
+      z: (n * (1 - e2) + h) * sl
+    };
+  }
+
+  // Inverse of satellite.js eciToEcf (x' = c x + s y, y' = -s x + c y).
+  function ecfToEci(ecf, gmst) {
+    const c = Math.cos(gmst), s = Math.sin(gmst);
+    return { x: c * ecf.x - s * ecf.y, y: s * ecf.x + c * ecf.y, z: ecf.z };
+  }
+
+  function observerEci(gd, gmst) { return ecfToEci(observerEcf(gd), gmst); }
+
+  /**
+   * Phase angle at the satellite, radians.
+   * phi = 0 is full phase (the Sun is behind the observer: sat→Sun and sat→observer are parallel).
+   * phi = pi is new phase (the satellite is between the Sun and the observer).
+   */
+  function phaseAngle(satEci, sunVec, obsEci) {
+    const sx = sunVec.x - satEci.x, sy = sunVec.y - satEci.y, sz = sunVec.z - satEci.z;
+    const ox = obsEci.x - satEci.x, oy = obsEci.y - satEci.y, oz = obsEci.z - satEci.z;
+    const sd = Math.hypot(sx, sy, sz), od = Math.hypot(ox, oy, oz);
+    if (!(sd > 0) || !(od > 0)) return null;
+    const cos = Math.min(1, Math.max(-1, (sx * ox + sy * oy + sz * oz) / (sd * od)));
+    return Math.acos(cos);
+  }
+
+  // Plane-parallel airmass. Below ~5° the secant formula runs away, so the elevation is floored.
+  const EXTINCTION_PER_AIRMASS = 0.2;
+  const AIRMASS_EL_FLOOR_DEG = 5;
+
+  function airmass(elDeg) {
+    const el = Math.max(elDeg, AIRMASS_EL_FLOOR_DEG);
+    return 1 / Math.sin(el * RAD);
+  }
+
+  /**
+   * Apparent visual magnitude.
+   * m = m_std + 5 log10(r/1000) - 2.5 log10(sin phi + (pi - phi) cos phi) + k X
+   * m_std is the magnitude at 1000 km and 90° phase (the phase term is 0 there).
+   * phi is radians, r is kilometres, X is airmass, k is 0.2 mag/airmass.
+   * Returns null when the phase function is not positive (dark face) or the object is not above the horizon.
+   */
+  function visualMagnitude(mStd, rangeKm, phaseRad, elDeg) {
+    if (mStd == null || !(rangeKm > 0) || phaseRad == null || !(elDeg > 0)) return null;
+    const phi = Math.min(Math.PI, Math.max(0, phaseRad));
+    const phase = Math.sin(phi) + (Math.PI - phi) * Math.cos(phi);
+    // At new phase the function is 0 (and a hair above 0 in floating point). That face is dark.
+    if (!(phase > 1e-6)) return null;
+    return mStd + 5 * Math.log10(rangeKm / 1000) - 2.5 * Math.log10(phase) + EXTINCTION_PER_AIRMASS * airmass(elDeg);
+  }
+
+  /*
+   * Standard magnitudes: apparent V at 1000 km and 90° phase (50% illuminated for a sphere).
+   * That is the m_std of the formula above. Heavens-Above publishes this as
+   * "Intrinsic brightness (Magnitude) at 1000km distance, 50% illuminated".
+   * McCants qs.mag uses a different scale (1000 km, full phase, brightest orientation),
+   * about 0.7–1.5 mag brighter; those numbers are cited only as a cross-check and are not m_std.
+   * qs.mag copy: https://github.com/barolfe/satellite-tracker/blob/master/qs.mag
+   * Definition note: https://mmccants.org/tles/intrmagdef.html
+   * Anything missing from this table returns null. The UI shows an em dash, never a guess.
+   */
+  const STD_MAG = {
+    // ISS (ZARYA), NORAD 25544. Heavens-Above intrinsic −1.8 (fetched 2026-11-15):
+    // https://www.heavens-above.com/satinfo.aspx?satid=25544
+    // Ted Molczan's 2005 reduction was −1.3 for the smaller 2002–2005 station
+    // (https://www.satobs.org/seesat/Aug-2005/0114.html). qs.mag lists −2.0 on the other scale.
+    25544: -1.8,
+    // CSS (TIANHE), the Tiangong core SatPass tracks as 48274. Heavens-Above intrinsic 0.0:
+    // https://www.heavens-above.com/satinfo.aspx?satid=48274
+    // Wentian (53239) and Mengtian (54216) have no intrinsic magnitude on Heavens-Above, so they stay blank.
+    48274: 0.0,
+    // HST, NORAD 20580. Heavens-Above intrinsic 2.2:
+    // https://www.heavens-above.com/satinfo.aspx?satid=20580
+    // qs.mag lists 1.5 on the full-phase scale.
+    20580: 2.2,
+    // ENVISAT, NORAD 27386. Heavens-Above intrinsic 3.7:
+    // https://www.heavens-above.com/satinfo.aspx?satid=27386
+    // qs.mag lists 3.0 on the full-phase scale.
+    27386: 3.7,
+    // SL-16 (Zenit-2) rocket bodies, each value read from that object's Heavens-Above satinfo page.
+    // They are not all the same, so other SL-16 catalog numbers are left unknown.
+    // qs.mag lists 2.0 for 22566 (Cosmos 2237 Rk) and 25407 (Cosmos 2360 Rk) on the other scale.
+    22566: 2.7, // https://www.heavens-above.com/satinfo.aspx?satid=22566
+    25407: 2.7, // https://www.heavens-above.com/satinfo.aspx?satid=25407
+    20625: 2.7, // https://www.heavens-above.com/satinfo.aspx?satid=20625
+    28353: 2.7, // https://www.heavens-above.com/satinfo.aspx?satid=28353
+    31793: 2.7, // https://www.heavens-above.com/satinfo.aspx?satid=31793
+    16182: 3.2  // https://www.heavens-above.com/satinfo.aspx?satid=16182
+  };
+
+  // New Starlinks have no per-object m_std. Heavens-Above lists intrinsic magnitude 5.0
+  // (1000 km, 50% illuminated) for STARLINK-11300, NORAD 61243:
+  // https://www.heavens-above.com/satinfo.aspx?satid=61243
+  // That is an approximation for the type, not a measurement of each new vehicle.
+  // Mallama's phase-uncorrected 1000 km means are fainter (VisorSat ~7.2; arXiv:2101.00374).
+  const STARLINK_MSTD = 5.0;
+
+  function standardMagnitude(norad, name) {
+    if (Object.prototype.hasOwnProperty.call(STD_MAG, norad)) return { m: STD_MAG[norad], approx: false };
+    if (name && /^STARLINK-\d/i.test(String(name))) return { m: STARLINK_MSTD, approx: true };
+    return null;
+  }
+
+  function launchPrefix(objectId) {
+    const m = String(objectId || '').match(/^(\d{4}-\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function isStarlinkName(name, norad, starlinkIds) {
+    if (starlinkIds && starlinkIds.has(norad)) return true;
+    return /^STARLINK-\d/i.test(String(name || ''));
+  }
+
+  function formatLaunchDay(iso) {
+    const d = new Date(String(iso).slice(0, 10) + 'T00:00:00Z');
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(d);
+  }
+
+  // Along-track length of a cluster. Lead is the object at the forward end (highest mean anomaly).
+  function trainGeometry(members) {
+    const order = members.map(m => ({ m, ma: ((m.meanAnomaly % 360) + 360) % 360 })).sort((a, b) => a.ma - b.ma);
+    const forward = (from, to) => { let g = to - from; if (g <= 0) g += 360; return g; };
+    let biggest = 0, at = 0;
+    for (let i = 0; i < order.length; i++) {
+      const g = forward(order[i].ma, order[(i + 1) % order.length].ma);
+      if (g >= biggest) { biggest = g; at = i; }
+    }
+    const arc = [];
+    for (let k = 1; k <= order.length; k++) arc.push(order[(at + k) % order.length]);
+    const arcDeg = 360 - biggest;
+    const n = members.reduce((s, m) => s + m.meanMotion, 0) / members.length;
+    const spreadMin = n > 0 ? (arcDeg / 360) * (1440 / n) : 0;
+    return { lead: arc[arc.length - 1].m, spreadMin, arcDeg };
+  }
+
+  function clusterByMeanMotion(list, span) {
+    const sorted = list.slice().sort((a, b) => a.meanMotion - b.meanMotion);
+    const clusters = [];
+    for (const o of sorted) {
+      const c = clusters[clusters.length - 1];
+      if (!c) { clusters.push([o]); continue; }
+      const vals = c.map(x => x.meanMotion);
+      const lo = Math.min(o.meanMotion, ...vals), hi = Math.max(o.meanMotion, ...vals);
+      if (hi - lo <= span + 1e-9) c.push(o);
+      else clusters.push([o]);
+    }
+    return clusters;
+  }
+
+  /**
+   * Starlink trains: same international-designator launch (YYYY-NNN), launched within ~10 days,
+   * still within meanMotionSpan rev/day of each other, and at least minCount objects.
+   * Prediction uses the lead object. spreadMin is the along-track length in minutes.
+   * objects: {name, norad, objectId, meanMotion, meanAnomaly, launchDate}
+   */
+  function detectTrains(objects, now, opts = {}) {
+    const maxAge = opts.maxAgeDays ?? 10;
+    const nnSpan = opts.meanMotionSpan ?? 0.05;
+    const minCount = opts.minCount ?? 3;
+    const ids = opts.starlinkIds || null;
+    const byLaunch = new Map();
+    for (const o of objects || []) {
+      const prefix = launchPrefix(o.objectId);
+      if (!prefix || !isStarlinkName(o.name, o.norad, ids)) continue;
+      if (!o.launchDate || !(o.meanMotion > 0)) continue;
+      const launched = Date.parse(String(o.launchDate).slice(0, 10) + 'T00:00:00Z');
+      if (Number.isNaN(launched)) continue;
+      const ageDays = (now.getTime() - launched) / 86400000;
+      if (ageDays < 0 || ageDays > maxAge) continue;
+      if (!byLaunch.has(prefix)) byLaunch.set(prefix, { launchDate: String(o.launchDate).slice(0, 10), members: [] });
+      byLaunch.get(prefix).members.push(o);
+    }
+    const trains = [];
+    for (const [prefix, group] of byLaunch) {
+      const clusters = clusterByMeanMotion(group.members, nnSpan);
+      clusters.forEach((members, i) => {
+        if (members.length < minCount) return;
+        const geo = trainGeometry(members);
+        const day = formatLaunchDay(group.launchDate);
+        trains.push({
+          key: prefix + '#' + i,
+          prefix,
+          launchDate: group.launchDate,
+          label: `Starlink train (Group ${prefix}, launched ${day})`,
+          lead: geo.lead,
+          members,
+          count: members.length,
+          spreadMin: geo.spreadMin
+        });
+      });
+    }
+    trains.sort((a, b) => a.launchDate < b.launchDate ? 1 : a.launchDate > b.launchDate ? -1 : a.key.localeCompare(b.key));
+    return trains;
+  }
+
+  /** Hourly cloud samples: {t, total, low, mid, high}. Outside the first/last hour is no forecast. */
+  function cloudKind(pct) {
+    if (pct < 25) return 'clear';
+    if (pct <= 70) return 'partly';
+    return 'cloudy';
+  }
+
+  function nearestCloud(samples, timeMs) {
+    if (!samples || !samples.length) return null;
+    const first = samples[0].t, last = samples[samples.length - 1].t;
+    if (!(timeMs >= first && timeMs <= last)) return { forecast: false };
+    let best = null, bestD = Infinity;
+    for (const s of samples) {
+      if (s.total == null || Number.isNaN(+s.total)) continue;
+      const d = Math.abs(s.t - timeMs);
+      if (d < bestD) { best = s; bestD = d; }
+    }
+    if (!best) return { forecast: false };
+    return {
+      forecast: true, total: +best.total,
+      low: best.low == null ? null : +best.low,
+      mid: best.mid == null ? null : +best.mid,
+      high: best.high == null ? null : +best.high,
+      kind: cloudKind(+best.total)
+    };
+  }
+
+  root.SatCore = {
+    parseTLE, makeSat, makeSatFromOmm, findPasses, stateNow, groundTrack, subSolar, compass, sunElevation, observerGd, look,
+    observerEci, phaseAngle, airmass, visualMagnitude, standardMagnitude, launchPrefix, detectTrains, nearestCloud, cloudKind,
+    EXTINCTION_PER_AIRMASS, AIRMASS_EL_FLOOR_DEG, STARLINK_MSTD
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

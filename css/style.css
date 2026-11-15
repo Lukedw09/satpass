@@ -44,6 +44,22 @@ button.ghost{background:transparent;border:1px solid var(--line);color:var(--tex
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{padding:7px 9px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line)}
 th{position:sticky;top:0;background:#10173a;color:var(--muted);font-weight:600;font-size:12px}
+.thbtn{background:transparent;color:inherit;padding:0;border-radius:0;font:inherit;font-weight:600}
+.thbtn:hover{filter:none;color:var(--text)}
+table.nocoloud .cloud{display:none}
+.cicon{display:inline-flex;align-items:center;gap:5px}
+.cicon::before{content:"";width:10px;height:10px;border-radius:50%;display:inline-block;background:#8a96c2}
+.cicon.clear::before{background:#ffd166;box-shadow:0 0 0 2px #ffd16644}
+.cicon.partly::before{background:linear-gradient(90deg,#ffd166 50%,#8a96c2 50%)}
+.mag{font-variant-numeric:tabular-nums}
+.trainbanner{background:#ffd16614;border:1px solid #ffd16666;color:var(--gold);border-radius:8px;padding:8px 12px;margin:0 0 10px}
+.trainbanner p{margin:3px 0}
+.trainbanner .sub{color:var(--muted);font-size:12px}
+.recent{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.recent h3{margin:0 0 6px;font-size:12px;letter-spacing:.8px;text-transform:uppercase;color:var(--accent2)}
+.recentlist{max-height:220px;overflow:auto}
+.skybox{position:relative;max-width:520px;margin:0 auto}
+.skyhover{position:absolute;z-index:2;pointer-events:none;background:#10173aee;border:1px solid #ffd16688;color:var(--gold);border-radius:6px;padding:2px 7px;font-size:12px;white-space:nowrap}
 tbody tr{cursor:pointer}
 tbody tr:hover{background:#18214a}
 tbody tr.sel{background:#22306a}

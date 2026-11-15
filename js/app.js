@@ -7,7 +7,9 @@
   const GROUPS = ['stations', 'visual'];
   const AUTO_REFRESH_MS = 2 * 3600e3;      // CelesTrak updates GP data ~every 2 h; don't poll faster
   const MANUAL_COOLDOWN_MS = 10 * 60e3;
-  const LS_TLE = 'satpass.tle.v1', LS_SET = 'satpass.settings.v1', LS_CUSTOM = 'satpass.custom.v1', LS_ALERTS = 'satpass.alerts.v1';
+  const LS_TLE = 'satpass.tle.v1', LS_SET = 'satpass.settings.v1', LS_CUSTOM = 'satpass.custom.v1', LS_ALERTS = 'satpass.alerts.v1', LS_CLOUD = 'satpass.clouds.v1';
+  const CLOUD_TTL = 3600e3;
+  const CELESTRAK_SATCAT = 'https://celestrak.org/satcat/records.php';
   const HOME = { name: 'Killearn Lakes, Tallahassee FL', lat: 30.588, lon: -84.243, elev: 60 };
   const ISS_NORAD = 25544;
   const DEFAULT_SATS = [25544, 48274, 20580, 27386, 25407, 22566];
@@ -17,13 +19,15 @@
   const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* quota / private mode */ } };
 
-  const settings = Object.assign({ obs: { ...HOME }, days: 7, minEl: 10, sunMax: -6, visOnly: true,
+  const settings = Object.assign({ obs: { ...HOME }, days: 7, minEl: 10, sunMax: -6, visOnly: true, maxMag: null,
     sats: DEFAULT_SATS.map(n => ({ norad: n, on: true })) }, load(LS_SET, {}));
   let custom = load(LS_CUSTOM, {});        // norad -> {name,l1,l2,norad} for objects added by search
   let catalog = new Map();                  // norad -> rec from group downloads
   let satObjs = new Map();                  // norad -> SatCore sat
   let dataMeta = null;
   let passes = [], selKey = null, liveNorad = null, lastFetchMs = 0;
+  let recentByNorad = new Map(), recentOmms = [], trains = [], launchDates = {}, starlinkIds = new Set();
+  let sortMode = 'time', skyPts = [], skyCursor = null, cloudPack = null;
   let alerts = loadAlerts();
   const alertTimers = new Map();
 
@@ -52,35 +56,112 @@
     } finally { clearTimeout(t); }
   }
 
+  async function fetchJSON(url, ms = 20000) {
+    const data = JSON.parse(await fetchText(url, ms));
+    if (!Array.isArray(data)) throw new Error('unexpected response');
+    return data;
+  }
+
+  function stampMag(sat) {
+    const std = C.standardMagnitude(sat.norad, sat.name);
+    sat.mStd = std ? std.m : null;
+    sat.magApprox = !!(std && std.approx);
+    return sat;
+  }
+
+  function satFromSetting(s) {
+    const rec = recOf(s.norad);
+    let sat = null;
+    try {
+      if (rec && rec.l1) sat = C.makeSat(rec);
+      else if (recentByNorad.has(s.norad)) sat = C.makeSatFromOmm(recentByNorad.get(s.norad));
+      else if (rec && rec.omm) sat = C.makeSatFromOmm(rec.omm);
+    } catch (e) { console.warn(e); return null; }
+    if (!sat) return null;
+    stampMag(sat);
+    if (s.trainKey) {
+      const t = trains.find(x => x.key === s.trainKey);
+      if (t) { sat.name = t.label; sat.trainSpreadMin = t.spreadMin; sat.trainCount = t.count; }
+    }
+    return sat;
+  }
+
   function ingest(text) {
     catalog = new Map();
     for (const r of C.parseTLE(text)) if (!catalog.has(r.norad)) catalog.set(r.norad, r);
   }
 
+  async function fetchRecent() {
+    // Same 2-hour cache as the station and visual TLEs. Starlink is kept as catalog numbers only.
+    const [recent, star, cat] = await Promise.all([
+      fetchJSON(`${CELESTRAK}?GROUP=last-30-days&FORMAT=json`).catch(() => null),
+      fetchJSON(`${CELESTRAK}?GROUP=starlink&FORMAT=json`, 25000).catch(() => null),
+      fetchJSON(`${CELESTRAK_SATCAT}?GROUP=last-30-days&FORMAT=json`).catch(() => null)
+    ]);
+    const dates = {};
+    if (cat) for (const o of cat) {
+      const p = C.launchPrefix(o.OBJECT_ID);
+      if (p && o.LAUNCH_DATE) dates[p] = String(o.LAUNCH_DATE).slice(0, 10);
+    }
+    return {
+      recent: recent || null,
+      starlinkIds: star ? star.map(o => +o.NORAD_CAT_ID).filter(n => n > 0) : null,
+      launchDates: Object.keys(dates).length ? dates : null
+    };
+  }
+
+  function applyRecent(blob) {
+    recentOmms = blob && Array.isArray(blob.recent) ? blob.recent : [];
+    recentByNorad = new Map(recentOmms.map(o => [+o.NORAD_CAT_ID, o]));
+    starlinkIds = new Set((blob && blob.starlinkIds) || []);
+    launchDates = (blob && blob.launchDates) || {};
+    const objs = recentOmms.map(o => ({
+      name: o.OBJECT_NAME, norad: +o.NORAD_CAT_ID, objectId: o.OBJECT_ID,
+      meanMotion: o.MEAN_MOTION, meanAnomaly: o.MEAN_ANOMALY,
+      launchDate: launchDates[C.launchPrefix(o.OBJECT_ID)] || null
+    }));
+    trains = C.detectTrains(objs, new Date(), { starlinkIds });
+    reconcileTrains();
+  }
+
+  function reconcileTrains() {
+    const live = new Map(trains.map(t => [t.key, t]));
+    settings.sats = settings.sats.filter(s => !s.trainKey || live.has(s.trainKey));
+    for (const s of settings.sats) if (s.trainKey && live.has(s.trainKey)) s.norad = live.get(s.trainKey).lead.norad;
+  }
+
   async function loadData(force) {
     const cache = load(LS_TLE, null);
-    const fresh = cache && Date.now() - cache.fetchedMs < AUTO_REFRESH_MS;
+    const fresh = cache && cache.v === 2 && Date.now() - cache.fetchedMs < AUTO_REFRESH_MS;
     if (cache) lastFetchMs = Math.max(lastFetchMs, cache.fetchedMs);
-    if (!force && fresh) { ingest(cache.text); dataMeta = { kind: 'cache', fetchedMs: cache.fetchedMs }; }
+    if (!force && fresh) { ingest(cache.text); applyRecent(cache); dataMeta = { kind: 'cache', fetchedMs: cache.fetchedMs }; }
     else {
       setStatus('Downloading TLEs from CelesTrak…');
       try {
         const texts = await Promise.all(GROUPS.map(g => fetchText(`${CELESTRAK}?GROUP=${g}&FORMAT=tle`)));
         const text = texts.join('\n');
         if (C.parseTLE(text).length < 5) throw new Error('unexpected response');
-        ingest(text); lastFetchMs = Date.now();
-        save(LS_TLE, { fetchedMs: lastFetchMs, text });
+        ingest(text);
+        const extra = await fetchRecent();
+        const prev = cache && cache.v === 2 ? cache : null;
+        if (!extra.recent && prev) extra.recent = prev.recent;
+        if (!extra.starlinkIds && prev) extra.starlinkIds = prev.starlinkIds;
+        if (!extra.launchDates && prev) extra.launchDates = prev.launchDates;
+        lastFetchMs = Date.now();
+        const blob = { v: 2, fetchedMs: lastFetchMs, text, ...extra };
+        save(LS_TLE, blob);
+        applyRecent(blob);
         dataMeta = { kind: 'live', fetchedMs: lastFetchMs };
         await refreshCustom();
       } catch (e) {
-        if (cache) { ingest(cache.text); dataMeta = { kind: 'cache', fetchedMs: cache.fetchedMs, err: e.message }; }
+        if (cache && cache.text) { ingest(cache.text); applyRecent(cache); dataMeta = { kind: 'cache', fetchedMs: cache.fetchedMs, err: e.message }; }
         else {
           const fb = window.SATPASS_FALLBACK;
-          ingest(fb.tle); dataMeta = { kind: 'fallback', fetchedMs: Date.parse(fb.fetchedUtc), err: e.message };
+          ingest(fb.tle); applyRecent(null); dataMeta = { kind: 'fallback', fetchedMs: Date.parse(fb.fetchedUtc), err: e.message };
         }
       }
     }
-    buildSats(); renderStatus(); renderCatalog();
+    buildSats(); renderStatus(); renderCatalog(); renderRecent();
   }
 
   async function refreshCustom() {
@@ -96,8 +177,8 @@
   function buildSats() {
     satObjs = new Map();
     for (const s of settings.sats) {
-      const r = recOf(s.norad); if (!r) continue;
-      try { satObjs.set(s.norad, C.makeSat(r)); } catch (e) { console.warn(e); }
+      const sat = satFromSetting(s);
+      if (sat) satObjs.set(s.norad, sat);
     }
   }
 
@@ -124,6 +205,7 @@
   function renderSatList() {
     const ul = $('satList'); ul.innerHTML = '';
     settings.sats.forEach(s => {
+      if (s.recent) return;
       const sat = satObjs.get(s.norad), li = document.createElement('li');
       const ageD = sat ? (Date.now() - sat.epoch.getTime()) / 86400e3 : null;
       li.innerHTML = `<input type="checkbox" ${s.on ? 'checked' : ''} title="include in predictions">
@@ -136,8 +218,67 @@
       ul.appendChild(li);
     });
     const sel = $('liveSat'), cur = liveNorad; sel.innerHTML = '';
-    for (const s of settings.sats) { const sat = satObjs.get(s.norad); if (!sat) continue; const o = document.createElement('option'); o.value = s.norad; o.textContent = sat.name; sel.appendChild(o); }
+    for (const s of settings.sats) {
+      if (s.recent && !s.on) continue;
+      const sat = satObjs.get(s.norad); if (!sat) continue;
+      const o = document.createElement('option'); o.value = s.norad; o.textContent = sat.name; sel.appendChild(o);
+    }
     if (cur && satObjs.has(cur)) sel.value = cur; else if (sel.options.length) { liveNorad = +sel.options[0].value; sel.value = liveNorad; }
+  }
+
+  function fmtSpread(min) {
+    if (!(min >= 0)) return '';
+    return min < 10 ? `${min.toFixed(1)} min` : `${Math.round(min)} min`;
+  }
+
+  function recentOn(match) { return settings.sats.find(match); }
+
+  function toggleRecent(entry, on) {
+    settings.sats = settings.sats.filter(s => entry.trainKey ? s.trainKey !== entry.trainKey : !(s.recent && !s.trainKey && s.norad === entry.norad));
+    if (on) {
+      settings.sats.push(entry);
+      const omm = recentByNorad.get(entry.norad);
+      if (omm && !catalog.has(entry.norad)) { custom[entry.norad] = { omm, norad: entry.norad, name: omm.OBJECT_NAME }; save(LS_CUSTOM, custom); }
+    }
+    persist(); buildSats(); renderSatList(); renderRecent(); recompute();
+  }
+
+  function renderRecent() {
+    const wrap = $('recentWrap'), ul = $('recentList');
+    if (!wrap || !ul) return;
+    if (!recentOmms.length) { wrap.hidden = true; ul.innerHTML = ''; return; }
+    wrap.hidden = false;
+    const members = new Set();
+    for (const t of trains) for (const m of t.members) members.add(m.norad);
+    ul.innerHTML = '';
+    const addRow = (html, on, change) => {
+      const li = document.createElement('li');
+      li.innerHTML = html;
+      const box = li.querySelector('input');
+      box.checked = on;
+      box.onchange = () => change(box.checked);
+      ul.appendChild(li);
+    };
+    for (const t of trains) {
+      const on = !!recentOn(s => s.trainKey === t.key && s.on);
+      addRow(`<input type="checkbox" title="include this train">
+        <span class="sw" style="background:${colorOf(t.lead.norad)}"></span>
+        <span class="nm">${esc(t.label)}
+          <small>${t.count} satellites · lead #${t.lead.norad} · spread ${fmtSpread(t.spreadMin)}</small></span>`, on,
+        checked => toggleRecent({ norad: t.lead.norad, on: true, recent: true, trainKey: t.key }, checked));
+    }
+    const rest = recentOmms.filter(o => !members.has(+o.NORAD_CAT_ID)).slice().sort((a, b) => String(a.OBJECT_NAME).localeCompare(String(b.OBJECT_NAME)));
+    for (const o of rest) {
+      const norad = +o.NORAD_CAT_ID;
+      const on = !!recentOn(s => s.recent && !s.trainKey && s.norad === norad && s.on);
+      const rawDay = launchDates[C.launchPrefix(o.OBJECT_ID)];
+      const day = rawDay ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(new Date(rawDay.slice(0, 10) + 'T00:00:00Z')) : '';
+      addRow(`<input type="checkbox" title="include this satellite">
+        <span class="sw" style="background:${colorOf(norad)}"></span>
+        <span class="nm">${esc(o.OBJECT_NAME)}
+          <small>#${norad}${day ? ` · launched ${esc(day)}` : ''}</small></span>`, on,
+        checked => toggleRecent({ norad, on: true, recent: true }, checked));
+    }
   }
 
   async function addSat(q) {
@@ -184,6 +325,7 @@
     }
     passes = all.filter(p => p.set.t > now).sort((a, b) => a.rise.t - b.rise.t);
     reconcileAlerts();
+    renderTrainBanner();
     renderPasses();
   }
   const keyOf = p => `${p.norad}:${Math.round(p.rise.t / 60000)}`;
@@ -466,11 +608,82 @@
     });
   }
 
+  function bannerWhen(ms) {
+    const d = new Date(ms);
+    const wd = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(d);
+    const tm = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }).format(d);
+    return `${wd} ${tm}`;
+  }
+
+  function renderTrainBanner() {
+    const el = $('trainBanner');
+    if (!el) return;
+    const items = [];
+    const now = Date.now(), start = new Date(now - 20 * 60e3), end = new Date(now + settings.days * 86400e3);
+    for (const t of trains) {
+      const omm = recentByNorad.get(t.lead.norad);
+      if (!omm) continue;
+      let sat;
+      try { sat = stampMag(C.makeSatFromOmm(omm)); } catch { continue; }
+      sat.name = t.label;
+      let found = [];
+      try { found = C.findPasses(sat, settings.obs, start, end, { minEl: settings.minEl, sunMax: settings.sunMax }); }
+      catch { continue; }
+      const p = found.filter(x => x.visible && x.visible.end.t > now).sort((a, b) => a.visible.start.t - b.visible.start.t)[0];
+      if (p) items.push({ t, p });
+    }
+    items.sort((a, b) => a.p.visible.start.t - b.p.visible.start.t);
+    if (!items.length) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    el.innerHTML = items.slice(0, 3).map(({ t, p }) =>
+      `<p>Starlink train visible ${bannerWhen(p.visible.start.t)}, look ${C.compass(p.visible.start.az)} <span class="sub">· ${esc(t.label)} · spread ${fmtSpread(t.spreadMin)}</span></p>`
+    ).join('');
+  }
+
+  function shownPasses() {
+    let list = settings.visOnly ? passes.filter(p => p.visible) : passes.slice();
+    if (settings.maxMag != null && !Number.isNaN(+settings.maxMag)) {
+      const lim = +settings.maxMag;
+      list = list.filter(p => p.peakMag != null && Math.round(p.peakMag * 10) / 10 < lim);
+    }
+    if (sortMode === 'mag-asc' || sortMode === 'mag-desc') {
+      const dir = sortMode === 'mag-asc' ? 1 : -1;
+      list.sort((a, b) => {
+        if (a.peakMag == null && b.peakMag == null) return a.rise.t - b.rise.t;
+        if (a.peakMag == null) return 1;
+        if (b.peakMag == null) return -1;
+        return (a.peakMag - b.peakMag) * dir || a.rise.t - b.rise.t;
+      });
+    }
+    return list;
+  }
+
+  function magCell(p) {
+    if (p.peakMag == null || !Number.isFinite(p.peakMag)) return '<td class="mag">—</td>';
+    const approx = satObjs.get(p.norad)?.magApprox ? 'Approximate standard magnitude for this type of Starlink' : 'Peak visual magnitude along the visible pass';
+    return `<td class="mag" title="${esc(approx)}">${p.peakMag.toFixed(1)}</td>`;
+  }
+
+  function cloudCell(p) {
+    if (!cloudPack) return '<td class="cloud"></td>';
+    const c = C.nearestCloud(cloudPack.samples, p.max.t);
+    if (!c || !c.forecast) return '<td class="cloud">no forecast</td>';
+    const pct = v => v == null || Number.isNaN(v) ? '—' : `${Math.round(v)}%`;
+    const tip = `Total ${Math.round(c.total)}% · low ${pct(c.low)} · mid ${pct(c.mid)} · high ${pct(c.high)}`;
+    return `<td class="cloud"><span class="cicon ${c.kind}" title="${esc(tip)}">${Math.round(c.total)}%</span></td>`;
+  }
+
   function renderPasses() {
-    const tb = $('passTable').querySelector('tbody'); tb.innerHTML = '';
-    const list = settings.visOnly ? passes.filter(p => p.visible) : passes;
+    skyCursor = null;
+    const tip = $('skyHover'); if (tip) tip.hidden = true;
+    const table = $('passTable');
+    table.classList.toggle('nocoloud', !cloudPack);
+    const tb = table.querySelector('tbody'); tb.innerHTML = '';
+    $('magSort').textContent = sortMode === 'mag-asc' ? 'Mag ▲' : sortMode === 'mag-desc' ? 'Mag ▼' : 'Mag';
+    const list = shownPasses();
     const nVis = passes.filter(p => p.visible).length;
-    $('passCount').textContent = `${list.length} shown · ${nVis} visible · next ${settings.days} days · times ${tzAbbr(new Date())}`;
+    const magNote = settings.maxMag != null && !Number.isNaN(+settings.maxMag) ? ` · brighter than ${settings.maxMag}` : '';
+    $('passCount').textContent = `${list.length} shown · ${nVis} visible · next ${settings.days} days · times ${tzAbbr(new Date())}${magNote}`;
     $('tzLabel').textContent = `America/New_York (${tzAbbr(new Date())})`;
     if (!list.some(p => keyOf(p) === selKey)) { const d = list.find(p => p.visible) || list[0]; selKey = d ? keyOf(d) : null; }
     const now = Date.now();
@@ -485,12 +698,12 @@
         <td>${T(p.rise.t)} <span class="sub">${C.compass(p.rise.az)}</span></td>
         <td>${T(p.max.t)} <b>${deg(p.max.el)}</b> <span class="sub">${C.compass(p.max.az)}</span></td>
         <td>${T(p.set.t)} <span class="sub">${C.compass(p.set.az)}</span></td>
-        <td>${dur(p.durationSec)}</td><td>${vis}</td><td class="alertcell">${alertButtons(p)}</td>`;
+        <td>${dur(p.durationSec)}</td>${magCell(p)}${cloudCell(p)}<td>${vis}</td><td class="alertcell">${alertButtons(p)}</td>`;
       wireAlertButtons(tr, p);
-      tr.onclick = () => { selKey = k; liveNorad = p.norad; $('liveSat').value = p.norad; renderPasses(); };
+      tr.onclick = () => { selKey = k; liveNorad = p.norad; if ($('liveSat').querySelector(`option[value="${p.norad}"]`)) $('liveSat').value = p.norad; renderPasses(); };
       tb.appendChild(tr);
     }
-    if (!list.length) tb.innerHTML = `<tr><td colspan="8" class="muted">No passes match. Try lowering the minimum elevation, adding days, or unticking “visible only”.</td></tr>`;
+    if (!list.length) tb.innerHTML = `<tr><td colspan="10" class="muted">No passes match. Try lowering the minimum elevation, adding days, relaxing the magnitude filter, or unticking “visible only”.</td></tr>`;
     drawSky();
   }
 
@@ -509,6 +722,7 @@
     ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'].forEach((t, i) => { const a = i * 45 * Math.PI / 180, r = R + 18; g.fillText(t, cx + r * Math.sin(a), cy - r * Math.cos(a)); });
     g.textAlign = 'left'; g.textBaseline = 'alphabetic';
     const p = selected();
+    skyPts = [];
     if (!p) { $('skyTitle').textContent = 'select a pass'; $('skyInfo').innerHTML = ''; return; }
     $('skyTitle').textContent = `${p.name} · ${fmtDate.format(new Date(p.max.t))}`;
     g.lineWidth = 4; g.lineCap = 'round';
@@ -516,6 +730,11 @@
       const a = p.track[i - 1], b = p.track[i];
       g.strokeStyle = b.vis ? '#ffd166' : (b.lit ? '#6ea8ff' : '#4a5380');
       g.beginPath(); g.moveTo(...P(a.az, a.el)); g.lineTo(...P(b.az, b.el)); g.stroke();
+    }
+    for (const pt of p.track) {
+      if (pt.el <= 0) continue;
+      const [x, y] = P(pt.az, pt.el);
+      skyPts.push({ x, y, mag: pt.mag });
     }
     const mark = (pt, shape, label) => {
       const [x, y] = P(pt.az, pt.el); g.fillStyle = '#fff'; g.strokeStyle = '#0b1020'; g.lineWidth = 2; g.beginPath();
@@ -531,15 +750,28 @@
     if (sat && now >= p.rise.t && now <= p.set.t) {
       const st = C.stateNow(sat, settings.obs); if (st && st.el > 0) { const [x, y] = P(st.az, st.el); g.fillStyle = '#3ddc97'; g.beginPath(); g.arc(x, y, 7, 0, 7); g.fill(); }
     }
+    if (skyCursor) {
+      const label = 'mag ' + (skyCursor.mag == null || !Number.isFinite(skyCursor.mag) ? '—' : skyCursor.mag.toFixed(1));
+      g.font = 'bold 13px system-ui';
+      const tw = g.measureText(label).width;
+      const x = Math.min(Math.max(8, skyCursor.x + 12), W - tw - 14);
+      const y = Math.min(Math.max(20, skyCursor.y - 12), W - 8);
+      g.fillStyle = '#10173af2'; g.strokeStyle = '#ffd166'; g.lineWidth = 1;
+      g.beginPath(); g.roundRect(x - 5, y - 14, tw + 10, 20, 4); g.fill(); g.stroke();
+      g.fillStyle = '#ffd166'; g.fillText(label, x, y);
+    }
     const v = p.visible;
+    const magTxt = p.peakMag == null ? '—' : p.peakMag.toFixed(1) + (sat && sat.magApprox ? ' approx' : '');
+    const spreadNote = sat && sat.trainSpreadMin != null ? ` Train spread ${fmtSpread(sat.trainSpreadMin)} (${sat.trainCount} satellites), timed from the lead.` : '';
     $('skyInfo').innerHTML = `
       <div><b>Rise</b>${T(p.rise.t)}<br>${azTxt(p.rise.az)}</div>
       <div><b>Max</b>${T(p.max.t)}<br>${deg(p.max.el, 1)} · ${azTxt(p.max.az)}</div>
       <div><b>Set</b>${T(p.set.t)}<br>${azTxt(p.set.az)}</div>
       <div><b>Duration</b>${dur(p.durationSec)}</div>
+      <div><b>Peak mag</b>${magTxt}</div>
       <div><b>Range at max</b>${Math.round(p.max.range).toLocaleString()} km</div>
       <div><b>Sun at max</b>${deg(p.sunElAtMax, 1)}</div>
-      <div style="grid-column:1/-1"><b>Naked-eye visibility</b>${v ? `Visible ${T(v.start.t)} (${deg(v.start.el)} ${C.compass(v.start.az)}) → max ${deg(v.max.el)} ${C.compass(v.max.az)} → ${T(v.end.t)} (${deg(v.end.el)} ${C.compass(v.end.az)})${v.end.t < p.set.t - 20000 && !p.set.lit ? ', then fades into Earth’s shadow' : ''}` : 'Not visible: ' + (p.sunElAtMax > settings.sunMax ? 'sky too bright (sun above ' + settings.sunMax + '°)' : 'satellite in Earth’s shadow or below 10°')}</div>
+      <div style="grid-column:1/-1"><b>Naked-eye visibility</b>${v ? `Visible ${T(v.start.t)} (${deg(v.start.el)} ${C.compass(v.start.az)}) → max ${deg(v.max.el)} ${C.compass(v.max.az)} → ${T(v.end.t)} (${deg(v.end.el)} ${C.compass(v.end.az)})${v.end.t < p.set.t - 20000 && !p.set.lit ? ', then fades into Earth’s shadow' : ''}${spreadNote}` : 'Not visible: ' + (p.sunElAtMax > settings.sunMax ? 'sky too bright (sun above ' + settings.sunMax + '°)' : 'satellite in Earth’s shadow or below 10°')}</div>
       <div class="remind" style="grid-column:1/-1">${alertButtons(p)}<span class="when">${alerts.leadMin} min before ${p.visible ? 'it becomes visible' : 'rise'}</span></div>`;
   }
 
@@ -636,27 +868,113 @@
     const o = settings.obs;
     $('obsName').value = o.name || ''; $('obsLat').value = o.lat; $('obsLon').value = o.lon; $('obsElev').value = o.elev;
     $('optDays').value = settings.days; $('optMinEl').value = settings.minEl; $('optSun').value = settings.sunMax; $('optVisOnly').checked = settings.visOnly;
+    $('optMag').value = settings.maxMag == null ? '' : settings.maxMag;
+  }
+  function nyLocalToMs(iso) {
+    const [d, tm] = String(iso).split('T');
+    const [Y, M, D] = d.split('-').map(Number);
+    const [h, m] = (tm || '00:00').split(':').map(Number);
+    let utc = Date.UTC(Y, M - 1, D, h || 0, m || 0);
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
+    for (let i = 0; i < 2; i++) {
+      const parts = Object.fromEntries(fmt.formatToParts(new Date(utc)).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+      const got = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
+      const want = Date.UTC(Y, M - 1, D, h || 0, m || 0);
+      if (got === want) break;
+      utc += want - got;
+    }
+    return utc;
+  }
+  async function loadClouds(force) {
+    const lat = +settings.obs.lat, lon = +settings.obs.lon;
+    const cache = load(LS_CLOUD, null);
+    const same = cache && Math.abs(cache.lat - lat) < 0.01 && Math.abs(cache.lon - lon) < 0.01 && Array.isArray(cache.samples);
+    if (!force && same && Date.now() - cache.fetchedMs < CLOUD_TTL) { cloudPack = cache; return; }
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}&hourly=cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high&timezone=America/New_York&forecast_days=7`;
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      const H = j && j.hourly;
+      if (!H || !Array.isArray(H.time)) throw new Error('no hourly');
+      const samples = H.time.map((iso, i) => ({
+        t: nyLocalToMs(iso),
+        total: H.cloud_cover[i],
+        low: H.cloud_cover_low[i],
+        mid: H.cloud_cover_mid[i],
+        high: H.cloud_cover_high[i]
+      })).filter(s => Number.isFinite(s.t)).sort((a, b) => a.t - b.t);
+      cloudPack = { lat, lon, fetchedMs: Date.now(), samples };
+      save(LS_CLOUD, cloudPack);
+    } catch {
+      // A failed fetch hides the column. A cache from the last few hours is still the last good fetch.
+      if (same && Date.now() - cache.fetchedMs < 3 * CLOUD_TTL) cloudPack = cache;
+      else cloudPack = null;
+    }
+  }
+  function bindSkyHover() {
+    const cv = $('sky'), tip = $('skyHover');
+    if (!cv || !tip) return;
+    let frame = 0;
+    cv.addEventListener('mousemove', e => {
+      const rect = cv.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * cv.width / rect.width;
+      const y = (e.clientY - rect.top) * cv.height / rect.height;
+      let best = null, bd = 20 * 20;
+      for (const p of skyPts) {
+        const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+        if (d < bd) { bd = d; best = p; }
+      }
+      skyCursor = best;
+      const box = cv.parentElement.getBoundingClientRect();
+      if (!best) tip.hidden = true;
+      else {
+        tip.hidden = false;
+        tip.textContent = 'mag ' + (best.mag == null || !Number.isFinite(best.mag) ? '—' : best.mag.toFixed(1));
+        tip.style.left = (e.clientX - box.left + 12) + 'px';
+        tip.style.top = (e.clientY - box.top - 18) + 'px';
+      }
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawSky(); });
+    });
+    cv.addEventListener('mouseleave', () => { tip.hidden = true; skyCursor = null; drawSky(); });
   }
   function readObs() {
     const lat = parseFloat($('obsLat').value), lon = parseFloat($('obsLon').value), elev = parseFloat($('obsElev').value) || 0;
     if (!(lat >= -90 && lat <= 90) || !(lon >= -180 && lon <= 180)) { $('geoMsg').className = 'hint err'; $('geoMsg').textContent = 'Latitude must be −90…90 and longitude −180…180.'; return; }
     $('geoMsg').className = 'hint'; $('geoMsg').textContent = '';
-    settings.obs = { name: $('obsName').value, lat, lon, elev }; persist(); recompute();
+    const moved = Math.abs(settings.obs.lat - lat) > 1e-4 || Math.abs(settings.obs.lon - lon) > 1e-4;
+    settings.obs = { name: $('obsName').value, lat, lon, elev }; persist();
+    if (moved) loadClouds(true).then(() => renderPasses());
+    recompute();
   }
   function readOpts() {
     settings.days = Math.min(10, Math.max(1, parseInt($('optDays').value) || 7));
     settings.minEl = Math.min(89, Math.max(0, parseFloat($('optMinEl').value) || 0));
     const s = parseFloat($('optSun').value); settings.sunMax = isNaN(s) ? -6 : Math.min(0, Math.max(-18, s));
-    settings.visOnly = $('optVisOnly').checked; persist(); recompute();
+    settings.visOnly = $('optVisOnly').checked;
+    persist(); recompute();
+  }
+  function readMag() {
+    const raw = $('optMag').value.trim();
+    settings.maxMag = raw === '' || !Number.isFinite(parseFloat(raw)) ? null : parseFloat(raw);
+    persist();
+    if (passes.length || $('passTable')) renderPasses();
   }
 
   function init() {
     bindInputs();
     bindAlerts();
-    let deb; ['obsLat', 'obsLon', 'obsElev', 'obsName'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(readObs, 500); }));
+    bindSkyHover();
+    let deb, magDeb;
+    ['obsLat', 'obsLon', 'obsElev', 'obsName'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(readObs, 500); }));
     ['optDays', 'optMinEl', 'optSun'].forEach(id => $(id).addEventListener('change', readOpts));
     $('optVisOnly').addEventListener('change', readOpts);
-    $('resetObsBtn').onclick = () => { settings.obs = { ...HOME }; bindInputs(); persist(); recompute(); };
+    $('optMag').addEventListener('input', () => { clearTimeout(magDeb); magDeb = setTimeout(readMag, 250); });
+    $('magSort').onclick = () => { sortMode = sortMode === 'mag-asc' ? 'mag-desc' : sortMode === 'mag-desc' ? 'time' : 'mag-asc'; renderPasses(); };
+    $('dateSort').onclick = () => { sortMode = 'time'; renderPasses(); };
+    $('resetObsBtn').onclick = () => { settings.obs = { ...HOME }; bindInputs(); persist(); loadClouds(true).then(() => renderPasses()); recompute(); };
     $('geoBtn').onclick = () => {
       const m = $('geoMsg'); m.className = 'hint';
       if (!navigator.geolocation) { m.className = 'hint err'; m.textContent = 'Geolocation not available in this browser.'; return; }
@@ -673,6 +991,7 @@
     $('refreshBtn').onclick = async () => { await loadData(true); renderSatList(); recompute(); };
     $('liveSat').onchange = e => { liveNorad = +e.target.value; tickLive(); };
 
+    loadClouds(false).then(() => { if (passes.length) renderPasses(); });
     loadData(false).then(() => {
       renderSatList(); computeNow(); tickLive();
       setInterval(tickLive, 1000);
