@@ -70,9 +70,11 @@ Web Push on iPhone and iPad works only when SatPass is opened from the Home Scre
 
 The site and the alert cron are one Worker, `satpass`, configured in `wrangler.jsonc`. Static files are the asset directory. `/api/*` is handled by `worker/index.js` first. Subscriptions live in a KV namespace bound as `ALERTS`. KV is one JSON document per browser, looked up by a hash of the push address, which is the whole access pattern: write the document, list a page on each cron tick, delete it. A database would not add a query this data needs.
 
-Nothing here is deployed by this repository’s pull requests. The owner runs the steps below. The VAPID private key is never committed.
+Pull requests run `npx wrangler preview`. That publishes a preview of the branch, not the production Worker. Production still waits for the steps below. The VAPID private key is never committed.
 
-1. Create the KV namespace and put its id in `wrangler.jsonc` in place of the placeholder:
+`wrangler preview` does not inherit the top-level bindings. It reads the `previews` block. That block points `ALERTS` at the namespace `satpass-alerts-preview` (`2a7da83f859d4dfba0a4fbfe8a152f32`), which is separate from production. Cron triggers stay on the production config.
+
+1. Create the production KV namespace and put its id in the top-level `kv_namespaces` entry, in place of the placeholder:
 
 ```bash
 npx wrangler kv namespace create ALERTS
@@ -91,6 +93,12 @@ npx wrangler secret put VAPID_PRIVATE_KEY
 ```
 
 Paste the private JWK JSON as the secret value. The public key is derived from that JWK at runtime. `VAPID_SUBJECT` is already set to `mailto:satpass@lukedw09.workers.dev` in `wrangler.jsonc`; change it if the contact address should be different.
+
+Preview push uses the same key, applied to new previews rather than production:
+
+```bash
+npx wrangler preview base-config secret put VAPID_PRIVATE_KEY
+```
 
 4. Deploy. The cron `*/5 * * * *` is in `wrangler.jsonc`, so this deploy registers it:
 

@@ -23,5 +23,16 @@
   ],
   "triggers": {
     "crons": ["*/5 * * * *"]
+  },
+  "previews": {
+    "vars": {
+      "VAPID_SUBJECT": "mailto:satpass@lukedw09.workers.dev"
+    },
+    "kv_namespaces": [
+      {
+        "binding": "ALERTS",
+        "id": "2a7da83f859d4dfba0a4fbfe8a152f32"
+      }
+    ]
   }
 }
