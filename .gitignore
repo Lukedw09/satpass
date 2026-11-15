@@ -5,3 +5,8 @@ Thumbs.db
 .wrangler/
 .vscode/
 *.zip
+.dev.vars
+*.pem
+vapid*.json
+.env
+.env.*

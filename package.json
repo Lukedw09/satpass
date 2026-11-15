@@ -1,0 +1,16 @@
+{
+  "name": "satpass",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@pushforge/builder": "^2.0.5",
+    "satellite.js": "7.1.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.50.0"
+  }
+}

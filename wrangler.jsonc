@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "satpass",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-11-15",
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+  "assets": {
+    "directory": ".",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    "VAPID_SUBJECT": "mailto:satpass@lukedw09.workers.dev"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "ALERTS",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "previews": {
+    "vars": {
+      "VAPID_SUBJECT": "mailto:satpass@lukedw09.workers.dev"
+    },
+    "kv_namespaces": [
+      {
+        "binding": "ALERTS",
+        "id": "2a7da83f859d4dfba0a4fbfe8a152f32"
+      }
+    ]
+  }
+}

@@ -52,7 +52,65 @@ A visible window looks like `★ 7:29:15 PM – 7:32:01 PM`, plus the best point
 
 Every pass row, and the sky-chart detail under it, has a bell and an **Add to calendar** button. The bell asks for notification permission the first time you use it (or when you turn on the ISS option), then rings before the pass becomes visible. Choose **5, 10, or 15 minutes** under **Alerts**. **10** is the default. A gold bell means that pass is armed, and the card says how many alerts are set. **Notify me for all visible ISS passes** arms every visible ISS pass for you. The choice is remembered in this browser.
 
-Alerts work while SatPass is open, or while it is installed and running. A closed tab does not ring. **Add to calendar** downloads an `.ics` file with the same lead time, so your phone can remind you anyway. On an iPhone, Safari shows browser alerts only after you add SatPass to your Home Screen and open it from there; until then, use the calendar file.
+Those bells ring only while this tab is open. **Add to calendar** downloads an `.ics` file with the same lead time, so a phone calendar can remind you anyway. On an iPhone, Safari shows browser alerts only after you add SatPass to your Home Screen and open it from there.
+
+## Install the app
+
+**Install** appears in the header on Android Chrome once the browser offers to install SatPass. It uses the browser’s install prompt. On iPhone or iPad, the Alerts card says to tap Share, then Add to Home Screen, and to open SatPass from that icon. The installed app opens full screen, with a dark theme, and still launches if the network is down: the service worker keeps the page, the scripts, and the icons. Orbital data and the cloud forecast are not stored in that cache. The page keeps its own copies of those, and a failed refresh falls back to the copy already on the phone.
+
+## Closed-tab alerts
+
+**Alert me when closed** uses the same lead time, the ISS toggle, the bells you have armed, the visible-only filter, and the magnitude box. It asks for notification permission, then registers this browser with the SatPass Worker. A Cloudflare cron runs every 5 minutes. When a chosen pass starts within your lead time, the Worker sends one notice, for example `ISS in 10 min, rises NW 6:42 PM, max 54 deg, mag -3.1`. Tapping it opens SatPass on that pass. Changing the lead time, the place, the bells, or the filters updates the stored settings. **Stop closed-tab alerts** deletes them.
+
+The Worker stores a location rounded to about a kilometer, the NORAD numbers you chose, the lead time, whether you want visible passes only, an optional magnitude limit, and the browser’s push address. It does not store a name. Turning alerts off deletes that record. A push service that says the browser is gone (HTTP 404 or 410) deletes it too.
+
+Web Push on iPhone and iPad works only when SatPass is opened from the Home Screen, and only on iOS 16.4 or later. The Alerts card says so. Until then, use **Add to calendar**.
+
+## Deploying the Worker
+
+The site and the alert cron are one Worker, `satpass`, configured in `wrangler.jsonc`. Static files are the asset directory. `/api/*` is handled by `worker/index.js` first. Subscriptions live in a KV namespace bound as `ALERTS`. KV is one JSON document per browser, looked up by a hash of the push address, which is the whole access pattern: write the document, list a page on each cron tick, delete it. A database would not add a query this data needs.
+
+Pull requests run `npx wrangler preview`. That publishes a preview of the branch, not the production Worker. Production still waits for the steps below. The VAPID private key is never committed.
+
+`wrangler preview` does not inherit the top-level bindings. It reads the `previews` block. That block points `ALERTS` at the namespace `satpass-alerts-preview` (`2a7da83f859d4dfba0a4fbfe8a152f32`), which is separate from production. Cron triggers stay on the production config.
+
+1. Create the production KV namespace and put its id in the top-level `kv_namespaces` entry, in place of the placeholder:
+
+```bash
+npx wrangler kv namespace create ALERTS
+```
+
+2. Generate a VAPID key pair. `@pushforge/builder` prints a public key and a private JWK. Keep the private JWK. Do not commit it and do not paste it into the dashboard as a plain variable.
+
+```bash
+npx @pushforge/builder vapid
+```
+
+3. Store the private JWK as a Worker secret. This command deploys a new version, so run it only when you mean to publish:
+
+```bash
+npx wrangler secret put VAPID_PRIVATE_KEY
+```
+
+Paste the private JWK JSON as the secret value. The public key is derived from that JWK at runtime. `VAPID_SUBJECT` is already set to `mailto:satpass@lukedw09.workers.dev` in `wrangler.jsonc`; change it if the contact address should be different.
+
+Preview push uses the same key, applied to new previews rather than production:
+
+```bash
+npx wrangler preview base-config secret put VAPID_PRIVATE_KEY
+```
+
+4. Deploy. The cron `*/5 * * * *` is in `wrangler.jsonc`, so this deploy registers it:
+
+```bash
+npx wrangler deploy
+```
+
+Local development does not need a real key. A gitignored `.dev.vars` file with `SATPASS_DEV=1` makes `npx wrangler dev` mint a process-local key and enables `POST /api/push/test`. That flag is not set in `wrangler.jsonc`, so production does not expose the test route and does not invent a key.
+
+Each cron tick refreshes CelesTrak element sets at most every 2 hours (cached in the same KV namespace), searches only the next few minutes for each subscriber, and handles at most 20 subscribers. A pass is sent once. The sent key is the NORAD number plus the start minute, and keys older than two days are dropped.
+
+To run the checks: `node --test`. That covers magnitude, trains, clouds, pointing, subscription checks, the alert window, and the push text. MIT License © 2026 Luke de Wet. Orbits from [CelesTrak](https://celestrak.org/). Predictions use [satellite.js](https://github.com/shashwatak/satellite-js) (MIT). Web Push encryption uses [@pushforge/builder](https://github.com/pushforge/builder) (MIT). Cloud cover from [Open-Meteo](https://open-meteo.com/). Coastlines from [Natural Earth](https://www.naturalearthdata.com/).
 
 ## The sky chart
 
@@ -126,4 +184,4 @@ A fresh element set is usually good to about a kilometer, which is close enough 
 
 "Visible" is still geometry: dark sky, sunlit satellite, at least 10° up. The magnitude is a separate estimate and can be off by about a magnitude when the satellite is tumbling or the sky is hazy. Terrain is ignored, so a hill or a building can hide a low pass. Atmospheric refraction is ignored too; it lifts an object on the horizon by about half a degree and shifts rise or set by a few seconds. Times are always Eastern, whatever time zone you are standing in.
 
-To run a copy yourself, open `index.html` in a browser. Find it needs HTTPS, which the hosted site already has. `node --test` runs the magnitude, train, cloud, and pointing checks. MIT License © 2026 Luke de Wet. Orbits from [CelesTrak](https://celestrak.org/). Predictions use [satellite.js](https://github.com/shashwatak/satellite-js) (MIT). Cloud cover from [Open-Meteo](https://open-meteo.com/). Coastlines from [Natural Earth](https://www.naturalearthdata.com/).
+To run a copy of the page by itself, open `index.html` in a browser. Find it and closed-tab alerts need HTTPS, which the hosted site already has. The Worker steps are under Deploying the Worker.
