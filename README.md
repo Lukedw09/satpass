@@ -70,11 +70,13 @@ Web Push on iPhone and iPad works only when SatPass is opened from the Home Scre
 
 The site and the alert cron are one Worker, `satpass`, configured in `wrangler.jsonc`. Static files are the asset directory. `/api/*` is handled by `worker/index.js` first. Subscriptions live in a KV namespace bound as `ALERTS`. KV is one JSON document per browser, looked up by a hash of the push address, which is the whole access pattern: write the document, list a page on each cron tick, delete it. A database would not add a query this data needs.
 
-Pull requests run `npx wrangler preview`. That publishes a preview of the branch, not the production Worker. Production still waits for the steps below. The VAPID private key is never committed.
+Pull requests run `npx wrangler preview`. That publishes a preview of the branch, not the production Worker. The VAPID private key is never committed.
+
+The production namespace is `satpass-ALERTS` (`dc9ec40f3ac94fa292a79b31597e5039`). It has been created, and its id is the top-level `kv_namespaces` entry. The `VAPID_PRIVATE_KEY` Worker secret has been set on the `satpass` Worker. The steps below are how that setup was done.
 
 `wrangler preview` does not inherit the top-level bindings. It reads the `previews` block. That block points `ALERTS` at the namespace `satpass-alerts-preview` (`2a7da83f859d4dfba0a4fbfe8a152f32`), which is separate from production. Cron triggers stay on the production config.
 
-1. Create the production KV namespace and put its id in the top-level `kv_namespaces` entry, in place of the placeholder:
+1. Create the production KV namespace and put its id in the top-level `kv_namespaces` entry. Production is `satpass-ALERTS` (`dc9ec40f3ac94fa292a79b31597e5039`):
 
 ```bash
 npx wrangler kv namespace create ALERTS
