@@ -7,7 +7,7 @@
   const GROUPS = ['stations', 'visual'];
   const AUTO_REFRESH_MS = 2 * 3600e3;      // CelesTrak updates GP data ~every 2 h; don't poll faster
   const MANUAL_COOLDOWN_MS = 10 * 60e3;
-  const LS_TLE = 'satpass.tle.v1', LS_SET = 'satpass.settings.v1', LS_CUSTOM = 'satpass.custom.v1', LS_ALERTS = 'satpass.alerts.v1', LS_CLOUD = 'satpass.clouds.v1';
+  const LS_TLE = 'satpass.tle.v1', LS_SET = 'satpass.settings.v1', LS_CUSTOM = 'satpass.custom.v1', LS_ALERTS = 'satpass.alerts.v1', LS_CLOUD = 'satpass.clouds.v1', LS_PUSH = 'satpass.push.v1';
   const CLOUD_TTL = 3600e3;
   const CELESTRAK_SATCAT = 'https://celestrak.org/satcat/records.php';
   const HOME = { name: 'Killearn Lakes, Tallahassee FL', lat: 30.588, lon: -84.243, elev: 60 };
@@ -327,6 +327,22 @@
     reconcileAlerts();
     renderTrainBanner();
     renderPasses();
+    applyDeepLink();
+  }
+  let deepLinkDone = false;
+  function applyDeepLink() {
+    if (deepLinkDone) return;
+    const q = new URLSearchParams(location.search);
+    const norad = +q.get('norad');
+    if (!norad) { deepLinkDone = true; return; }
+    if (!passes.length) return;
+    deepLinkDone = true;
+    const rise = +q.get('rise');
+    liveNorad = norad;
+    const match = passes.find(p => p.norad === norad && (!rise || Math.abs(Math.round((p.visible ? p.visible.start.t : p.rise.t) / 60000) - rise) <= 2));
+    if (match) { selKey = keyOf(match); liveNorad = match.norad; }
+    if ($('liveSat') && $('liveSat').querySelector(`option[value="${norad}"]`)) $('liveSat').value = String(norad);
+    renderPasses();
   }
   const keyOf = p => `${p.norad}:${Math.round(p.rise.t / 60000)}`;
 
@@ -503,6 +519,7 @@
       setAlertMsg('');
       refreshAlertNote();
       renderPasses();
+      schedulePushSync();
       return;
     }
     if (passEvent(p) <= Date.now()) { setAlertMsg('That pass has already begun.', true); renderPasses(); return; }
@@ -518,6 +535,7 @@
       ? `${p.name} is already inside the ${alerts.leadMin}-minute window, so the alert rings in a moment.`
       : `Alert set for ${p.name}, ${alerts.leadMin} min before ${p.visible ? 'it becomes visible' : 'rise'}.`);
     renderPasses();
+    schedulePushSync();
   }
   function icsEscape(s) { return String(s).replace(/\\/g, '\\\\').replace(/\r?\n/g, '\\n').replace(/,/g, '\\,').replace(/;/g, '\\;'); }
   function icsStamp(ms) {
@@ -582,6 +600,7 @@
       scheduleAll();
       setAlertMsg(`Reminders ring ${alerts.leadMin} minutes before the pass.`);
       renderPasses();
+      schedulePushSync();
     };
     iss.onchange = async () => {
       if (iss.checked) {
@@ -597,6 +616,7 @@
       }
       reconcileAlerts();
       renderPasses();
+      schedulePushSync();
     };
     $('skyInfo').addEventListener('click', e => {
       const btn = e.target.closest('button[data-act]');
@@ -1178,12 +1198,166 @@
     const s = parseFloat($('optSun').value); settings.sunMax = isNaN(s) ? -6 : Math.min(0, Math.max(-18, s));
     settings.visOnly = $('optVisOnly').checked;
     persist(); recompute();
+    schedulePushSync();
   }
   function readMag() {
     const raw = $('optMag').value.trim();
     settings.maxMag = raw === '' || !Number.isFinite(parseFloat(raw)) ? null : parseFloat(raw);
     persist();
     if (passes.length || $('passTable')) renderPasses();
+    schedulePushSync();
+  }
+
+  // ---------- install and closed-tab alerts ----------
+  let pushSyncTimer = null;
+  function schedulePushSync() {
+    const state = load(LS_PUSH, null);
+    if (!state || !state.on) return;
+    clearTimeout(pushSyncTimer);
+    pushSyncTimer = setTimeout(() => { syncPush().catch(() => {}); }, 400);
+  }
+  function chosenNorads() {
+    const ids = new Set();
+    if (alerts.issAll) ids.add(ISS_NORAD);
+    for (const rec of Object.values(alerts.armed || {})) if (rec && rec.norad) ids.add(+rec.norad);
+    return [...ids].slice(0, 12);
+  }
+  function b64ToBuf(s) {
+    const pad = s + '='.repeat((4 - s.length % 4) % 4);
+    const bin = atob(pad.replace(/-/g, '+').replace(/_/g, '/'));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function pushBody(sub) {
+    return {
+      subscription: sub.toJSON ? sub.toJSON() : sub,
+      lat: settings.obs.lat, lon: settings.obs.lon,
+      norads: chosenNorads(), leadMin: alerts.leadMin,
+      visOnly: settings.visOnly, minMag: settings.maxMag
+    };
+  }
+  function paintPushButtons(on) {
+    $('pushBtn').hidden = on;
+    $('pushOffBtn').hidden = !on;
+  }
+  function showPushToast(data) {
+    const el = $('pushToast');
+    el.hidden = false;
+    el.textContent = 'Push received (local test): ' + (data.body || data.title || '');
+  }
+  async function syncPush() {
+    const state = load(LS_PUSH, null);
+    if (!state || !state.on || !state.endpoint) return;
+    const norads = chosenNorads();
+    if (!norads.length) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && await reg.pushManager.getSubscription();
+    if (!sub || sub.endpoint !== state.endpoint) return;
+    await fetch('/api/push/update', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(pushBody(sub))
+    });
+  }
+  async function enablePush() {
+    const norads = chosenNorads();
+    if (!norads.length) {
+      setAlertMsg('Turn on the ISS toggle, or tap a bell, so there is a satellite to watch.', true);
+      return;
+    }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setAlertMsg('This browser cannot receive closed-tab alerts. Use Add to calendar.', true);
+      return;
+    }
+    const ok = await ensurePermission();
+    if (!ok) return;
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const keyRes = await fetch('/api/push/key');
+    if (!keyRes.ok) {
+      setAlertMsg('Closed-tab alerts are not configured on this server yet. Use Add to calendar.', true);
+      return;
+    }
+    const key = await keyRes.json();
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBuf(key.publicKey) });
+    }
+    const res = await fetch('/api/push/subscribe', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(pushBody(sub))
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) { setAlertMsg(body.error || 'Could not save the alert.', true); return; }
+    save(LS_PUSH, { on: true, endpoint: sub.endpoint });
+    paintPushButtons(true);
+    if (key.dev) $('pushTestBtn').hidden = false;
+    setAlertMsg('Closed-tab alerts are on. A pass notice arrives ' + alerts.leadMin + ' minutes before it starts.');
+  }
+  async function disablePush() {
+    const state = load(LS_PUSH, null);
+    const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null;
+    const sub = reg && await reg.pushManager.getSubscription();
+    const endpoint = (sub && sub.endpoint) || (state && state.endpoint);
+    if (endpoint) {
+      await fetch('/api/push/unsubscribe', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ endpoint })
+      });
+    }
+    if (sub) await sub.unsubscribe();
+    save(LS_PUSH, { on: false });
+    paintPushButtons(false);
+    $('pushTestBtn').hidden = true;
+    setAlertMsg('Closed-tab alerts are off.');
+  }
+  async function sendTestPush() {
+    const state = load(LS_PUSH, null);
+    if (!state || !state.endpoint) { setAlertMsg('Turn on closed-tab alerts first.', true); return; }
+    const res = await fetch('/api/push/test', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ endpoint: state.endpoint })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) setAlertMsg(body.error || 'The test push did not send.', true);
+  }
+  function bindInstallPush() {
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+    if (ios && !standalone) $('iosInstall').hidden = false;
+    if (ios) $('iosPush').hidden = false;
+    let deferred = null;
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferred = e;
+      $('installBtn').hidden = false;
+    });
+    $('installBtn').onclick = async () => {
+      if (!deferred) return;
+      deferred.prompt();
+      await deferred.userChoice;
+      deferred = null;
+      $('installBtn').hidden = true;
+    };
+    window.addEventListener('appinstalled', () => { $('installBtn').hidden = true; });
+    if (new URLSearchParams(location.search).has('installDemo')) {
+      $('installBtn').hidden = false;
+      $('installDemoNote').hidden = false;
+    }
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'push') showPushToast(e.data);
+      });
+    }
+    const saved = load(LS_PUSH, null);
+    paintPushButtons(!!(saved && saved.on));
+    $('pushBtn').onclick = () => { enablePush().catch(err => setAlertMsg(err.message || 'Could not turn alerts on.', true)); };
+    $('pushOffBtn').onclick = () => { disablePush().catch(err => setAlertMsg(err.message || 'Could not turn alerts off.', true)); };
+    $('pushTestBtn').onclick = () => { sendTestPush().catch(err => setAlertMsg(err.message || 'The test push did not send.', true)); };
+    fetch('/api/push/key').then(r => r.ok ? r.json() : null).then(key => {
+      if (key && key.dev && saved && saved.on) $('pushTestBtn').hidden = false;
+    }).catch(() => {});
   }
 
   function init() {
@@ -1191,6 +1365,7 @@
     bindAlerts();
     bindSkyHover();
     bindFinder();
+    bindInstallPush();
     let deb, magDeb;
     ['obsLat', 'obsLon', 'obsElev', 'obsName'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(readObs, 500); }));
     ['optDays', 'optMinEl', 'optSun'].forEach(id => $(id).addEventListener('change', readOpts));
