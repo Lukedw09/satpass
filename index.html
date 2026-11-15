@@ -40,6 +40,7 @@
         <label>Sun below ° <input id="optSun" type="number" min="-18" max="0" step="1"></label>
       </div>
       <label class="check"><input id="optVisOnly" type="checkbox"> Visible (naked-eye) passes only</label>
+      <label>Brighter than mag <input id="optMag" type="number" step="0.1" placeholder="any" title="Show passes brighter than this magnitude. Blank keeps every pass."></label>
     </section>
 
     <section class="card" id="alertCard">
@@ -65,6 +66,11 @@
         <button type="submit">Add</button>
       </form>
       <div class="hint" id="addMsg"></div>
+      <div id="recentWrap" class="recent" hidden>
+        <h3>Recent launches</h3>
+        <p class="hint">Optional. A train is one entry and is predicted from its lead satellite. The spread is how many minutes the string takes to pass.</p>
+        <ul id="recentList" class="satlist recentlist"></ul>
+      </div>
     </section>
   </aside>
 
@@ -74,10 +80,15 @@
         <h2>Upcoming passes</h2>
         <span id="passCount" class="muted"></span>
       </div>
+      <div id="trainBanner" class="trainbanner" hidden></div>
       <div class="tablewrap">
-        <table id="passTable">
+        <table id="passTable" class="nocoloud">
           <thead><tr>
-            <th>Date</th><th>Satellite</th><th>Rise</th><th>Max</th><th>Set</th><th>Dur</th><th>Visible window</th><th class="alertcol"><span class="sr">Remind</span></th>
+            <th><button type="button" id="dateSort" class="thbtn">Date</button></th>
+            <th>Satellite</th><th>Rise</th><th>Max</th><th>Set</th><th>Dur</th>
+            <th><button type="button" id="magSort" class="thbtn" title="Sort by peak magnitude">Mag</button></th>
+            <th class="cloud">Cloud</th>
+            <th>Visible window</th><th class="alertcol"><span class="sr">Remind</span></th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -87,13 +98,19 @@
     <div class="grid2">
       <div class="card">
         <div class="cardhead"><h2>Sky chart</h2><span id="skyTitle" class="muted">select a pass</span></div>
-        <canvas id="sky" width="520" height="520"></canvas>
+        <div class="skybox">
+          <canvas id="sky" width="520" height="520"></canvas>
+          <div id="skyHover" class="skyhover" hidden></div>
+        </div>
         <div id="skyInfo" class="info"></div>
         <div class="legend"><span class="lg lit"></span>sunlit &amp; dark sky (visible) <span class="lg day"></span>sunlit, not visible (bright sky or below 10°) <span class="lg shadow"></span>in Earth's shadow</div>
       </div>
       <div class="card">
         <div class="cardhead"><h2>Live now</h2>
-          <select id="liveSat"></select>
+          <span class="livehead">
+            <button type="button" id="findBtn" class="ghost">Find it</button>
+            <select id="liveSat"></select>
+          </span>
         </div>
         <div id="live" class="live"></div>
         <canvas id="map" width="720" height="360"></canvas>
@@ -104,8 +121,34 @@
 </main>
 
 <footer>
-  Orbits: <a href="https://celestrak.org/" target="_blank" rel="noopener">CelesTrak</a> GP element sets · SGP4 via <a href="https://github.com/shashwatak/satellite-js" target="_blank" rel="noopener">satellite.js</a> · Coastlines: Natural Earth · Times in <span id="tzLabel">America/New_York</span> · <a href="https://github.com/Lukedw09/satpass" target="_blank" rel="noopener">source</a>
+  Orbits: <a href="https://celestrak.org/" target="_blank" rel="noopener">CelesTrak</a> GP element sets · SGP4 via <a href="https://github.com/shashwatak/satellite-js" target="_blank" rel="noopener">satellite.js</a> · Cloud cover: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a> · Coastlines: Natural Earth · Times in <span id="tzLabel">America/New_York</span> · <a href="https://github.com/Lukedw09/satpass" target="_blank" rel="noopener">source</a>
 </footer>
+
+<div id="finder" class="finder" hidden>
+  <video id="finderCam" playsinline autoplay muted></video>
+  <div class="finder-shade"></div>
+  <div class="finder-top">
+    <button type="button" id="finderClose" class="ghost">Close</button>
+    <div id="finderName" class="finder-name">Find it</div>
+    <button type="button" id="finderCamBtn" class="ghost">Camera</button>
+  </div>
+  <div id="finderArrow" class="finder-arrow" hidden><i></i></div>
+  <div id="finderCross" class="finder-cross"></div>
+  <div id="finderCue" class="finder-cue"></div>
+  <div id="finderRead" class="finder-read"></div>
+  <div id="finderCal" class="finder-cal" hidden>Wave the phone in a figure-8 to calibrate the compass.</div>
+  <div id="finderGate" class="finder-gate">
+    <p id="finderGateMsg"></p>
+    <button type="button" id="finderEnable">Enable compass</button>
+  </div>
+  <div id="finderDemo" class="finder-demo" hidden>
+    <span>Desktop emulation</span>
+    <button type="button" id="demoOff" class="ghost">Off target</button>
+    <button type="button" id="demoOn" class="ghost">On target</button>
+    <button type="button" id="demoLand" class="ghost">Landscape</button>
+    <button type="button" id="demoCal" class="ghost">Compass hint</button>
+  </div>
+</div>
 
 <script src="vendor/satellite.min.js"></script>
 <script src="data/fallback-tle.js"></script>
