@@ -2,10 +2,13 @@
    The VAPID private key is env.VAPID_PRIVATE_KEY, set with `wrangler secret put`. */
 import { loadSatCore } from './core-loader.js';
 import { loadVapid, publicKeyFromPrivateJwk, sendPush } from './vapid.js';
-import { validateSubscription, subscriptionId, duePasses, pruneSent, alertPayload, CRON_WINDOW_MS } from './alerts.js';
+import { validateSubscription, subscriptionId, duePasses, dueWindowMs, pruneSent, alertPayload, testAlertPayload, CRON_WINDOW_MS } from './alerts.js';
 
 const TLE_TTL_MS = 2 * 3600 * 1000;
+const TLE_TTL_SEC = Math.round(TLE_TTL_MS / 1000);
+const TEST_PUSH_MS = 60 * 1000;
 const SUB_LIMIT = 20;
+const EXTRA_FETCH_CAP = 8;
 const JSON_HDR = { 'content-type': 'application/json; charset=utf-8' };
 
 function json(data, status = 200) {
@@ -66,19 +69,22 @@ async function handleApi(request, env) {
     return json({ ok: true });
   }
   if (request.method === 'POST' && path === '/api/push/test') {
-    if (env.SATPASS_DEV !== '1') return json({ error: 'Not found' }, 404);
     const body = await readJson(request);
     if (!body || typeof body.endpoint !== 'string') return json({ error: 'Missing endpoint' }, 400);
     const id = await subscriptionId(body.endpoint);
     const rec = await env.ALERTS.get('sub:' + id, 'json');
-    if (!rec) return json({ error: 'Subscribe before sending a test' }, 404);
-    const payload = {
-      title: 'SatPass test',
-      body: 'ISS in 10 min, rises NW 6:42 PM, max 54 deg, mag -3.1',
-      url: '/?norad=25544',
-      tag: 'test'
-    };
+    // The body only selects the caller's stored subscription. Nothing else is pushed.
+    if (!rec || rec.endpoint !== body.endpoint) return json({ error: 'Subscribe before sending a test' }, 404);
+    const gate = 'test:' + id;
+    const prev = Number(await env.ALERTS.get(gate));
+    const now = Date.now();
+    if (Number.isFinite(prev) && prev > 0 && now - prev < TEST_PUSH_MS) {
+      return json({ error: 'Wait a minute before another test push' }, 429);
+    }
+    await env.ALERTS.put(gate, String(now), { expirationTtl: 120 });
+    const payload = testAlertPayload();
     const res = await sendPush(env, { endpoint: rec.endpoint, keys: rec.keys }, payload);
+    logPush(null, res.status);
     if (res.status === 404 || res.status === 410) {
       await env.ALERTS.delete('sub:' + id);
       return json({ error: 'The browser dropped this subscription' }, 410);
@@ -105,43 +111,125 @@ async function ensureTles(env, core) {
   return text;
 }
 
-async function tleFor(env, core, catalog, norad) {
-  if (catalog.has(norad)) return;
-  const extra = await env.ALERTS.get('tle:extra', 'json');
-  const bag = extra && Date.now() - extra.fetchedMs < TLE_TTL_MS ? extra.text : '';
-  if (bag) {
-    for (const rec of core.parseTLE(bag)) catalog.set(rec.norad, rec);
-    if (catalog.has(norad)) return;
-  }
-  const res = await fetch(`https://celestrak.org/NORAD/elements/gp.php?CATNR=${norad}&FORMAT=tle`, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) return;
-  const text = await res.text();
-  const rec = core.parseTLE(text)[0];
-  if (!rec) return;
-  catalog.set(rec.norad, rec);
-  await env.ALERTS.put('tle:extra', JSON.stringify({ fetchedMs: Date.now(), text: (bag ? bag + '\n' : '') + text }));
+function satCacheKey(norad) {
+  return 'tle:sat:' + norad;
 }
 
-async function alertOne(env, core, catalog, rec, keyName, now) {
-  const missing = rec.norads.filter(n => !catalog.has(n)).slice(0, 8);
-  for (const n of missing) await tleFor(env, core, catalog, n);
+async function readSatCache(env, norad) {
+  const cached = await env.ALERTS.get(satCacheKey(norad), 'json');
+  if (!cached || !Number.isFinite(cached.fetchedMs)) return null;
+  if (Date.now() - cached.fetchedMs >= TLE_TTL_MS) return null;
+  return cached;
+}
+
+async function writeSatCache(env, norad, value) {
+  const record = { ...value, fetchedMs: Date.now() };
+  await env.ALERTS.put(satCacheKey(norad), JSON.stringify(record), { expirationTtl: TLE_TTL_SEC });
+}
+
+async function rememberMiss(env, catalog, norad, status) {
+  try { await writeSatCache(env, norad, { ok: false, status }); }
+  catch { /* a cache write failure still leaves the lookup error for the caller */ }
+  catalog.set(norad, { miss: true });
+}
+
+/**
+ * Catalog numbers missing from the station/visual bundle. Legacy TLE cannot
+ * hold a 6-digit NORAD id (CelesTrak returns 404), so this always uses OMM
+ * JSON and the same makeSatFromOmm path as the page. Hits and misses stay
+ * in KV for 2 hours, which is CelesTrak's minimum refetch gap.
+ */
+async function tleFor(env, core, catalog, norad) {
+  if (catalog.has(norad)) return;
+  const cached = await readSatCache(env, norad);
+  if (cached) {
+    if (!cached.ok || !cached.omm) {
+      catalog.set(norad, { miss: true });
+      return;
+    }
+    try { catalog.set(norad, core.makeSatFromOmm(cached.omm)); }
+    catch (err) {
+      catalog.set(norad, { miss: true });
+      throw err;
+    }
+    return;
+  }
+  let res;
+  try {
+    res = await fetch(`https://celestrak.org/NORAD/elements/gp.php?CATNR=${norad}&FORMAT=json`, { signal: AbortSignal.timeout(8000) });
+  } catch (err) {
+    await rememberMiss(env, catalog, norad, 0);
+    throw err;
+  }
+  if (!res.ok) {
+    await res.body?.cancel();
+    await rememberMiss(env, catalog, norad, res.status);
+    return;
+  }
+  let omm = null;
+  try {
+    const data = await res.json();
+    omm = Array.isArray(data) ? data[0] : data;
+  } catch (err) {
+    await rememberMiss(env, catalog, norad, res.status || 0);
+    throw err;
+  }
+  if (!omm || omm.NORAD_CAT_ID == null) {
+    await rememberMiss(env, catalog, norad, res.status);
+    return;
+  }
+  let sat;
+  try { sat = core.makeSatFromOmm(omm); }
+  catch (err) {
+    await rememberMiss(env, catalog, norad, res.status);
+    throw err;
+  }
+  catalog.set(sat.norad, sat);
+  if (sat.norad !== norad) catalog.set(norad, sat);
+  try { await writeSatCache(env, norad, { ok: true, omm }); }
+  catch { /* this tick can still propagate the elements it already parsed */ }
+}
+
+function asSat(core, entry) {
+  if (!entry || entry.miss) return null;
+  if (entry.satrec) return entry;
+  if (entry.l1) return core.makeSat(entry);
+  if (entry.omm) return core.makeSatFromOmm(entry.omm);
+  return null;
+}
+
+export function logPush(norad, status) {
+  const row = { kind: 'push', norad, status };
+  if (status === 401 || status === 403) row.error = 'VAPID';
+  else if (status === 429) row.error = 'rate-limited';
+  else if (!(status >= 200 && status < 300)) row.error = 'push-failed';
+  console.log(JSON.stringify(row));
+}
+
+async function alertOne(env, core, catalog, rec, keyName, now, windowMs = CRON_WINDOW_MS) {
   const obs = { lat: rec.lat, lon: rec.lon, elev: 0 };
   const start = new Date(now - 60 * 1000);
   const end = new Date(now + (rec.leadMin + 10) * 60000);
   const found = [];
-  for (const norad of rec.norads) {
-    const tle = catalog.get(norad);
-    if (!tle) continue;
-    let sat;
-    try { sat = core.makeSat(tle); } catch { continue; }
-    const std = core.standardMagnitude(sat.norad, sat.name);
-    sat.mStd = std ? std.m : null;
+  let extras = 0;
+  for (const norad of rec.norads || []) {
     try {
+      if (!catalog.has(norad)) {
+        if (extras >= EXTRA_FETCH_CAP) continue;
+        extras += 1;
+        await tleFor(env, core, catalog, norad);
+      }
+      const sat = asSat(core, catalog.get(norad));
+      if (!sat) continue;
+      const std = core.standardMagnitude(sat.norad, sat.name);
+      sat.mStd = std ? std.m : null;
       found.push(...core.findPasses(sat, obs, start, end, { minEl: 10, sunMax: -6, visMinEl: 10 }));
-    } catch { /* one bad element set should not stop the tick */ }
+    } catch (err) {
+      console.log(JSON.stringify({ kind: 'sat-error', norad, error: err && err.message ? err.message : String(err) }));
+    }
   }
   const due = duePasses(found, {
-    now, leadMin: rec.leadMin, windowMs: CRON_WINDOW_MS,
+    now, leadMin: rec.leadMin, windowMs,
     sent: rec.sent, visOnly: rec.visOnly, minMag: rec.minMag
   });
   if (!due.length) return;
@@ -149,6 +237,7 @@ async function alertOne(env, core, catalog, rec, keyName, now) {
   for (const item of due) {
     const payload = alertPayload(item, rec.leadMin);
     const res = await sendPush(env, { endpoint: rec.endpoint, keys: rec.keys }, payload);
+    logPush(item.pass.norad, res.status);
     if (res.status === 404 || res.status === 410) {
       await env.ALERTS.delete(keyName);
       return;
@@ -174,14 +263,19 @@ async function runCron(env) {
   const cursor = await env.ALERTS.get('meta:cursor');
   const page = await env.ALERTS.list({ prefix: 'sub:', limit: SUB_LIMIT, cursor: cursor || undefined });
   const now = Date.now();
+  const lastRun = Number(await env.ALERTS.get('meta:lastRun'));
+  const windowMs = dueWindowMs(lastRun, now);
   for (const key of page.keys) {
     const rec = await env.ALERTS.get(key.name, 'json');
     if (!rec || !rec.endpoint) continue;
-    try { await alertOne(env, core, catalog, rec, key.name, now); }
+    try { await alertOne(env, core, catalog, rec, key.name, now, windowMs); }
     catch (err) { console.log(JSON.stringify({ kind: 'subscriber-failed', message: err.message })); }
   }
   await env.ALERTS.put('meta:cursor', page.list_complete ? '' : (page.cursor || ''));
+  await env.ALERTS.put('meta:lastRun', String(now));
 }
+
+export { tleFor, alertOne, runCron };
 
 export default {
   async fetch(request, env) {

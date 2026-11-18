@@ -438,10 +438,22 @@
     saveAlerts();
     const mins = Math.max(0, Math.round((rec.eventT - Date.now()) / 60000));
     const when = mins <= 1 ? 'in about a minute' : `in ${mins} min`;
-    try {
-      const n = new Notification(`${rec.name} ${when}`, { body: rec.text, tag: 'satpass-' + k, lang: 'en' });
-      n.onclick = () => { try { window.focus(); } catch { /* ignore */ } n.close(); };
-    } catch { /* the browser refused to display it */ }
+    const title = `${rec.name} ${when}`;
+    const opts = { body: rec.text, tag: 'satpass-' + k, lang: 'en' };
+    // Page-constructed Notification throws on Android Chrome. The service
+    // worker can still show it; fall back only when that path is unavailable.
+    const fallback = () => {
+      try {
+        const n = new Notification(title, opts);
+        n.onclick = () => { try { window.focus(); } catch { /* ignore */ } n.close(); };
+      } catch { /* the browser refused to display it */ }
+    };
+    const sw = navigator.serviceWorker;
+    if (!sw || !sw.ready || typeof sw.getRegistration !== 'function') { fallback(); return; }
+    sw.getRegistration().then(reg => {
+      if (!reg) { fallback(); return null; }
+      return sw.ready.then(r => r.showNotification(title, opts));
+    }).catch(fallback);
   }
   function scheduleOne(k) {
     clearAlertTimer(k);
@@ -1240,6 +1252,7 @@
   function paintPushButtons(on) {
     $('pushBtn').hidden = on;
     $('pushOffBtn').hidden = !on;
+    $('pushTestBtn').hidden = !on;
   }
   function showPushToast(data) {
     const el = $('pushToast');
@@ -1291,7 +1304,6 @@
     if (!res.ok) { setAlertMsg(body.error || 'Could not save the alert.', true); return; }
     save(LS_PUSH, { on: true, endpoint: sub.endpoint });
     paintPushButtons(true);
-    if (key.dev) $('pushTestBtn').hidden = false;
     setAlertMsg('Closed-tab alerts are on. A pass notice arrives ' + alerts.leadMin + ' minutes before it starts.');
   }
   async function disablePush() {
@@ -1308,7 +1320,6 @@
     if (sub) await sub.unsubscribe();
     save(LS_PUSH, { on: false });
     paintPushButtons(false);
-    $('pushTestBtn').hidden = true;
     setAlertMsg('Closed-tab alerts are off.');
   }
   async function sendTestPush() {
@@ -1355,9 +1366,6 @@
     $('pushBtn').onclick = () => { enablePush().catch(err => setAlertMsg(err.message || 'Could not turn alerts on.', true)); };
     $('pushOffBtn').onclick = () => { disablePush().catch(err => setAlertMsg(err.message || 'Could not turn alerts off.', true)); };
     $('pushTestBtn').onclick = () => { sendTestPush().catch(err => setAlertMsg(err.message || 'The test push did not send.', true)); };
-    fetch('/api/push/key').then(r => r.ok ? r.json() : null).then(key => {
-      if (key && key.dev && saved && saved.on) $('pushTestBtn').hidden = false;
-    }).catch(() => {});
   }
 
   function init() {
