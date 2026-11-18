@@ -2,6 +2,17 @@
 const LEADS = new Set([5, 10, 15]);
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
 export const CRON_WINDOW_MS = 5 * 60 * 1000;
+export const MAX_LOOKBACK_MS = 30 * 60 * 1000;
+
+/**
+ * Look back from the previous cron run to now, and never more than 30 minutes.
+ * A missing or future timestamp uses the cap so a cold start stays bounded.
+ */
+export function dueWindowMs(lastRun, now, maxBack = MAX_LOOKBACK_MS) {
+  const last = Number(lastRun);
+  if (!Number.isFinite(last) || last <= 0 || last > now) return maxBack;
+  return Math.min(now - last, maxBack);
+}
 
 export function compass16(azDeg) {
   return COMPASS[Math.round((((azDeg % 360) + 360) % 360) / 22.5) % 16];
@@ -51,9 +62,10 @@ export async function subscriptionId(endpoint) {
 
 /**
  * A pass is due when (start − lead) is inside (now − window, now].
- * visOnly keeps naked-eye passes. minMag matches the page filter: the
- * one-decimal magnitude must be brighter than that limit. Unknown magnitudes
- * do not pass a magnitude limit.
+ * The cron sets window from the previous run (capped at 30 minutes) so a
+ * skipped tick is still covered. visOnly keeps naked-eye passes. minMag
+ * matches the page filter: the one-decimal magnitude must be brighter than
+ * that limit. Unknown magnitudes do not pass a magnitude limit.
  */
 export function duePasses(passes, { now, leadMin, windowMs = CRON_WINDOW_MS, sent, visOnly, minMag }) {
   const out = [];
@@ -97,6 +109,16 @@ export function formatAlertText({ name, leadMin, az, eventT, maxEl, peakMag }) {
     timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit'
   }).format(new Date(eventT));
   return `${shortName(name)} in ${leadMin} min, rises ${compass16(az)} ${when}, max ${Math.round(maxEl)} deg${magText(peakMag)}`;
+}
+
+/** A notice that cannot be mistaken for a real pass. */
+export function testAlertPayload() {
+  return {
+    title: 'SatPass test',
+    body: 'This is a test alert from SatPass. No satellite pass is due.',
+    url: '/',
+    tag: 'test'
+  };
 }
 
 export function alertPayload(item, leadMin) {

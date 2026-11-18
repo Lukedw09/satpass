@@ -64,6 +64,8 @@ Those bells ring only while this tab is open. **Add to calendar** downloads an `
 
 The Worker stores a location rounded to about a kilometer, the NORAD numbers you chose, the lead time, whether you want visible passes only, an optional magnitude limit, and the browser’s push address. It does not store a name. Turning alerts off deletes that record. A push service that says the browser is gone (HTTP 404 or 410) deletes it too.
 
+**Send test push** shows once closed-tab alerts are on. It notifies this browser only, says that it is a test, and will not send again for about a minute.
+
 Web Push on iPhone and iPad works only when SatPass is opened from the Home Screen, and only on iOS 16.4 or later. The Alerts card says so. Until then, use **Add to calendar**.
 
 ## Deploying the Worker
@@ -108,11 +110,11 @@ npx wrangler preview base-config secret put VAPID_PRIVATE_KEY
 npx wrangler deploy
 ```
 
-Local development does not need a real key. A gitignored `.dev.vars` file with `SATPASS_DEV=1` makes `npx wrangler dev` mint a process-local key and enables `POST /api/push/test`. That flag is not set in `wrangler.jsonc`, so production does not expose the test route and does not invent a key.
+Local development does not need a real key. A gitignored `.dev.vars` file with `SATPASS_DEV=1` makes `npx wrangler dev` mint a process-local key. That flag is not set in `wrangler.jsonc`, so production does not invent a key. `POST /api/push/test` is available in production too. It pushes only to the subscription that called it, and KV remembers the last attempt so a browser can send about one test a minute.
 
-Each cron tick refreshes CelesTrak element sets at most every 2 hours (cached in the same KV namespace), searches only the next few minutes for each subscriber, and handles at most 20 subscribers. A pass is sent once. The sent key is the NORAD number plus the start minute, and keys older than two days are dropped.
+Each cron tick refreshes the station and bright-satellite element sets at most every 2 hours (cached in the same KV namespace). A catalog number that is not in that bundle, including a 6-digit NORAD id that legacy TLE cannot hold, is loaded as OMM JSON and cached for 2 hours. A miss or a failed fetch is cached for 2 hours as well, so a 404 is not requested again on the next tick. Alerts are due from the previous cron run up to now, and never more than 30 minutes back. The cron handles at most 20 subscribers per tick. A pass is sent once. The sent key is the NORAD number plus the start minute, and keys older than two days are dropped.
 
-To run the checks: `node --test`. That covers magnitude, trains, clouds, pointing, subscription checks, the alert window, and the push text. MIT License © 2026 Luke de Wet. Orbits from [CelesTrak](https://celestrak.org/). Predictions use [satellite.js](https://github.com/shashwatak/satellite-js) (MIT). Web Push encryption uses [@pushforge/builder](https://github.com/pushforge/builder) (MIT). Cloud cover from [Open-Meteo](https://open-meteo.com/). Coastlines from [Natural Earth](https://www.naturalearthdata.com/).
+To run the checks: `node --test`. That covers magnitude, trains, clouds, pointing, subscription checks, the alert window, the push text, 6-digit OMM lookups, negative caching, a satellite error that must not block the rest, the test-push limit, and a skipped cron. MIT License © 2026 Luke de Wet. Orbits from [CelesTrak](https://celestrak.org/). Predictions use [satellite.js](https://github.com/shashwatak/satellite-js) (MIT). Web Push encryption uses [@pushforge/builder](https://github.com/pushforge/builder) (MIT). Cloud cover from [Open-Meteo](https://open-meteo.com/). Coastlines from [Natural Earth](https://www.naturalearthdata.com/).
 
 ## The sky chart
 
