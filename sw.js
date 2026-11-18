@@ -1,11 +1,12 @@
 /* SatPass service worker. App shell is cached for offline launch.
    CelesTrak and Open-Meteo are not cached here; the page keeps those in localStorage. */
-const CACHE = 'satpass-shell-v1';
+const CACHE = 'satpass-shell-v2';
 const SHELL = [
   '/',
   '/css/style.css',
   '/js/app.js',
   '/js/core.js',
+  '/js/push-location.js',
   '/vendor/satellite.min.js',
   '/data/fallback-tle.js',
   '/data/land-110m.js',

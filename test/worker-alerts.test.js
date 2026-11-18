@@ -301,6 +301,68 @@ describe('worker push alerts', { concurrency: false }, () => {
     });
   });
 
+  test('update stores a new rounded location and keeps sent passes', async () => {
+    const jwk = await fakeVapid();
+    const sub = await fakeSub('https://push.test/move');
+    const kv = memoryKv();
+    const env = {
+      ALERTS: kv,
+      VAPID_PRIVATE_KEY: JSON.stringify(jwk),
+      VAPID_SUBJECT: 'mailto:demo@example.com'
+    };
+    const post = (path, extra) => worker.fetch(new Request('https://satpass.test' + path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        subscription: sub,
+        lat: 30.5884,
+        lon: -84.2439,
+        norads: [25544],
+        leadMin: 10,
+        visOnly: true,
+        minMag: null,
+        ...extra
+      })
+    }), env);
+
+    const missing = await post('/api/push/update', { lat: 40, lon: -75 });
+    assert.equal(missing.status, 404);
+    assert.equal([...kv.puts].some(p => String(p.key).startsWith('sub:')), false);
+
+    const created = await post('/api/push/subscribe');
+    assert.equal(created.status, 200);
+    const createdBody = await created.json();
+    assert.equal(createdBody.lat, 30.59);
+    assert.equal(createdBody.lon, -84.24);
+    const id = await subscriptionId(sub.endpoint);
+    const stored = await kv.get('sub:' + id, 'json');
+    const sentAt = Date.now();
+    stored.sent = { '25544:100': sentAt };
+    await kv.put('sub:' + id, JSON.stringify(stored));
+
+    const updated = await post('/api/push/update', { lat: 40.7128, lon: -74.006 });
+    assert.equal(updated.status, 200);
+    const body = await updated.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.lat, 40.71);
+    assert.equal(body.lon, -74.01);
+    const after = await kv.get('sub:' + id, 'json');
+    assert.equal(after.lat, 40.71);
+    assert.equal(after.lon, -74.01);
+    assert.equal(after.sent['25544:100'], sentAt);
+    assert.equal(after.endpoint, sub.endpoint);
+    assert.equal(after.norads[0], 25544);
+    assert.equal(after.lat, Math.round(40.7128 * 100) / 100);
+    assert.equal(after.lon, Math.round(-74.006 * 100) / 100);
+
+    const rejected = await post('/api/push/update', { lat: 91, lon: 0 });
+    assert.equal(rejected.status, 400);
+    const kept = await kv.get('sub:' + id, 'json');
+    assert.equal(kept.lat, 40.71);
+    assert.equal(kept.lon, -74.01);
+    assert.equal(kept.sent['25544:100'], sentAt);
+  });
+
   test('cron records its run time and does not move it when elements are unavailable', async () => {
     const kv = memoryKv();
     const env = { ALERTS: kv };

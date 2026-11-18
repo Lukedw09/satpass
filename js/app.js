@@ -1,7 +1,8 @@
-/* SatPass UI. Depends on SatCore (js/core.js), SATPASS_FALLBACK, SATPASS_LAND. */
+/* SatPass UI. Depends on SatCore (js/core.js), SatPassLocation (js/push-location.js), SATPASS_FALLBACK, SATPASS_LAND. */
 (function () {
   'use strict';
   const C = window.SatCore;
+  const Loc = window.SatPassLocation;
   const TZ = 'America/New_York';
   const CELESTRAK = 'https://celestrak.org/NORAD/elements/gp.php';
   const GROUPS = ['stations', 'visual'];
@@ -1201,7 +1202,10 @@
     $('geoMsg').className = 'hint'; $('geoMsg').textContent = '';
     const moved = Math.abs(settings.obs.lat - lat) > 1e-4 || Math.abs(settings.obs.lon - lon) > 1e-4;
     settings.obs = { name: $('obsName').value, lat, lon, elev }; persist();
-    if (moved) loadClouds(true).then(() => renderPasses());
+    if (moved) {
+      loadClouds(true).then(() => renderPasses());
+      noteLocationDrift();
+    }
     recompute();
   }
   function readOpts() {
@@ -1222,11 +1226,65 @@
 
   // ---------- install and closed-tab alerts ----------
   let pushSyncTimer = null;
+  let pushSyncGen = 0;
+  function syncedPlace(state) {
+    if (!state || !Number.isFinite(+state.lat) || !Number.isFinite(+state.lon)) return null;
+    return Loc.roundObs(state.lat, state.lon);
+  }
+  function paintAlertLocation() {
+    const el = $('pushLoc');
+    if (!el) return;
+    const state = load(LS_PUSH, null);
+    const status = Loc.alertLocationStatus({
+      on: !!(state && state.on),
+      synced: syncedPlace(state),
+      obs: settings.obs,
+      failed: !!(state && state.locError)
+    });
+    el.hidden = !status.text;
+    el.className = status.err ? 'hint err' : 'hint';
+    el.textContent = status.text;
+  }
+  function noteLocationDrift() {
+    const state = load(LS_PUSH, null);
+    const on = !!(state && state.on);
+    const saved = syncedPlace(state);
+    if (on && state.locError && !Loc.locationNeedsSync(true, settings.obs, saved)) {
+      save(LS_PUSH, { ...state, locError: false });
+    }
+    paintAlertLocation();
+    if (Loc.locationNeedsSync(on, settings.obs, syncedPlace(load(LS_PUSH, null)))) schedulePushSync();
+  }
   function schedulePushSync() {
     const state = load(LS_PUSH, null);
     if (!state || !state.on) return;
     clearTimeout(pushSyncTimer);
     pushSyncTimer = setTimeout(() => { syncPush().catch(() => {}); }, 400);
+  }
+  async function pushSubscription(endpoint) {
+    if (!('serviceWorker' in navigator) || !endpoint) return null;
+    let reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) {
+      // register() on startup may still be activating. ready waits for that;
+      // the timer keeps a missing worker from hanging the sync.
+      reg = await Promise.race([
+        navigator.serviceWorker.ready.catch(() => null),
+        new Promise(resolve => setTimeout(() => resolve(null), 4000))
+      ]);
+    }
+    if (!reg || !reg.pushManager) return null;
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub || sub.endpoint !== endpoint) return null;
+    return sub;
+  }
+  function markLocationSyncFailed() {
+    const fresh = load(LS_PUSH, null);
+    if (!fresh || !fresh.on) return;
+    const place = Loc.roundObs(settings.obs.lat, settings.obs.lon);
+    if (place && !Loc.samePlace(place, syncedPlace(fresh))) {
+      save(LS_PUSH, { ...fresh, locError: true });
+    }
+    paintAlertLocation();
   }
   function chosenNorads() {
     const ids = new Set();
@@ -1260,17 +1318,39 @@
     el.textContent = 'Push received (local test): ' + (data.body || data.title || '');
   }
   async function syncPush() {
+    const gen = ++pushSyncGen;
     const state = load(LS_PUSH, null);
     if (!state || !state.on || !state.endpoint) return;
     const norads = chosenNorads();
-    if (!norads.length) return;
-    const reg = await navigator.serviceWorker.getRegistration();
-    const sub = reg && await reg.pushManager.getSubscription();
-    if (!sub || sub.endpoint !== state.endpoint) return;
-    await fetch('/api/push/update', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(pushBody(sub))
-    });
+    if (!norads.length) {
+      if (Loc.locationNeedsSync(true, settings.obs, syncedPlace(state))) markLocationSyncFailed();
+      return;
+    }
+    try {
+      const sub = await pushSubscription(state.endpoint);
+      if (!sub) {
+        if (Loc.locationNeedsSync(true, settings.obs, syncedPlace(state))) markLocationSyncFailed();
+        return;
+      }
+      if (gen !== pushSyncGen) return;
+      const sent = pushBody(sub);
+      const res = await fetch('/api/push/update', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(sent)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (gen !== pushSyncGen) return;
+      const fresh = load(LS_PUSH, null);
+      if (!fresh || !fresh.on) return;
+      if (!res.ok) { markLocationSyncFailed(); return; }
+      const place = Loc.acceptedPlace(data.lat, data.lon, sent.lat, sent.lon);
+      if (!place) { markLocationSyncFailed(); return; }
+      save(LS_PUSH, { ...fresh, lat: place.lat, lon: place.lon, locError: false });
+      paintAlertLocation();
+    } catch {
+      if (gen !== pushSyncGen) return;
+      markLocationSyncFailed();
+    }
   }
   async function enablePush() {
     const norads = chosenNorads();
@@ -1302,8 +1382,13 @@
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) { setAlertMsg(body.error || 'Could not save the alert.', true); return; }
-    save(LS_PUSH, { on: true, endpoint: sub.endpoint });
+    const place = Loc.acceptedPlace(body.lat, body.lon, settings.obs.lat, settings.obs.lon);
+    save(LS_PUSH, {
+      on: true, endpoint: sub.endpoint, locError: false,
+      lat: place ? place.lat : undefined, lon: place ? place.lon : undefined
+    });
     paintPushButtons(true);
+    paintAlertLocation();
     setAlertMsg('Closed-tab alerts are on. A pass notice arrives ' + alerts.leadMin + ' minutes before it starts.');
   }
   async function disablePush() {
@@ -1318,8 +1403,11 @@
       });
     }
     if (sub) await sub.unsubscribe();
+    clearTimeout(pushSyncTimer);
+    pushSyncGen++;
     save(LS_PUSH, { on: false });
     paintPushButtons(false);
+    paintAlertLocation();
     setAlertMsg('Closed-tab alerts are off.');
   }
   async function sendTestPush() {
@@ -1363,6 +1451,7 @@
     }
     const saved = load(LS_PUSH, null);
     paintPushButtons(!!(saved && saved.on));
+    noteLocationDrift();
     $('pushBtn').onclick = () => { enablePush().catch(err => setAlertMsg(err.message || 'Could not turn alerts on.', true)); };
     $('pushOffBtn').onclick = () => { disablePush().catch(err => setAlertMsg(err.message || 'Could not turn alerts off.', true)); };
     $('pushTestBtn').onclick = () => { sendTestPush().catch(err => setAlertMsg(err.message || 'The test push did not send.', true)); };
@@ -1381,7 +1470,7 @@
     $('optMag').addEventListener('input', () => { clearTimeout(magDeb); magDeb = setTimeout(readMag, 250); });
     $('magSort').onclick = () => { sortMode = sortMode === 'mag-asc' ? 'mag-desc' : sortMode === 'mag-desc' ? 'time' : 'mag-asc'; renderPasses(); };
     $('dateSort').onclick = () => { sortMode = 'time'; renderPasses(); };
-    $('resetObsBtn').onclick = () => { settings.obs = { ...HOME }; bindInputs(); persist(); loadClouds(true).then(() => renderPasses()); recompute(); };
+    $('resetObsBtn').onclick = () => { settings.obs = { ...HOME }; bindInputs(); persist(); loadClouds(true).then(() => renderPasses()); recompute(); noteLocationDrift(); };
     $('geoBtn').onclick = () => {
       const m = $('geoMsg'); m.className = 'hint';
       if (!navigator.geolocation) { m.className = 'hint err'; m.textContent = 'Geolocation not available in this browser.'; return; }
