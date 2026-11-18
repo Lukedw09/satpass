@@ -66,6 +66,7 @@
         <button type="button" id="pushOffBtn" class="ghost" hidden>Stop closed-tab alerts</button>
         <button type="button" id="pushTestBtn" class="ghost" hidden>Send test push</button>
       </div>
+      <p id="pushLoc" class="hint" hidden aria-live="polite"></p>
       <p id="iosInstall" class="hint" hidden>On iPhone or iPad, tap the Share button, then Add to Home Screen. Open SatPass from that icon.</p>
       <p id="iosPush" class="hint" hidden>Web Push on iPhone and iPad works only after SatPass is on the Home Screen, and only on iOS 16.4 or later. Until then, use Add to calendar.</p>
       <p id="pushPrivacy" class="hint">Closed-tab alerts store a location rounded to about a kilometer, the satellites you chose, and this browser’s push address. Turn the alerts off, or let the browser expire them, and that record is deleted. Nothing else is kept.</p>
@@ -172,6 +173,7 @@
 <script src="data/fallback-tle.js"></script>
 <script src="data/land-110m.js"></script>
 <script src="js/core.js"></script>
+<script src="js/push-location.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

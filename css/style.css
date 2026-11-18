@@ -85,6 +85,8 @@ canvas{width:100%;height:auto;display:block;background:#0a0f22;border-radius:10p
 .lg.lit{background:var(--gold)}.lg.day{background:#6ea8ff}.lg.shadow{background:#4a5380}
 .lg.track{background:var(--gold)}.lg.obs{background:var(--good);width:8px;height:8px;border-radius:50%}.lg.night{background:#000a;border:1px solid var(--line);height:8px}
 #alertNote{margin:0 0 2px}
+#pushLoc{color:var(--text)}
+#pushLoc.err{color:var(--bad)}
 .alertbtns{display:inline-flex;gap:4px;vertical-align:middle}
 .iconbtn{background:transparent;border:1px solid var(--line);color:var(--muted);padding:4px 7px;border-radius:6px;line-height:0}
 .iconbtn.find{line-height:1.1;font-size:12px;padding:4px 7px}

@@ -50,7 +50,7 @@ async function handleApi(request, env) {
     if (parsed.error) return json({ error: parsed.error }, 400);
     if (!await publicKey(env)) return json({ error: 'Push is not configured' }, 503);
     const id = await putSub(env, parsed.value);
-    return json({ ok: true, id });
+    return json({ ok: true, id, lat: parsed.value.lat, lon: parsed.value.lon });
   }
   if (request.method === 'POST' && path === '/api/push/update') {
     const parsed = validateSubscription(await readJson(request));
@@ -58,8 +58,9 @@ async function handleApi(request, env) {
     const id = await subscriptionId(parsed.value.endpoint);
     const prev = await env.ALERTS.get('sub:' + id, 'json');
     if (!prev) return json({ error: 'No subscription stored for that browser' }, 404);
+    // parsed.value carries the new rounded place. sent history stays on the record.
     await putSub(env, parsed.value, prev.sent);
-    return json({ ok: true, id });
+    return json({ ok: true, id, lat: parsed.value.lat, lon: parsed.value.lon });
   }
   if (request.method === 'POST' && path === '/api/push/unsubscribe') {
     const body = await readJson(request);
