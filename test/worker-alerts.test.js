@@ -110,10 +110,14 @@ describe('worker push alerts', { concurrency: false }, () => {
     const core = await loadSatCore();
     const kv = memoryKv();
     const env = { ALERTS: kv };
-    await withMocks((url) => {
+    await withMocks((url, opts) => {
       assert.match(url, /CATNR=101292/);
       assert.match(url, /FORMAT=json/);
       assert.equal(url.includes('FORMAT=tle'), false);
+      const ua = opts && opts.headers && opts.headers['User-Agent'];
+      assert.match(ua, /SatPass\/1\.0/);
+      assert.match(ua, /mailto:satpass@lukedw09.workers.dev/);
+      assert.equal(opts.cache, 'no-store');
       return Response.json([OMM_101292]);
     }, async ({ calls }) => {
       const bundled = new Map([[101292, { norad: 101292, name: 'from bundle', l1: '1 x', l2: '2 x' }]]);
@@ -129,7 +133,7 @@ describe('worker push alerts', { concurrency: false }, () => {
       assert.equal(sat.name, 'DEMO-101292');
       assert.equal(calls.length, 1);
       const put = kv.puts.find(p => p.key === 'tle:sat:101292');
-      assert.equal(put.opts.expirationTtl, 2 * 3600);
+      assert.equal(put.opts.expirationTtl, 3 * 24 * 3600);
       const cached = await kv.get('tle:sat:101292', 'json');
       assert.equal(cached.ok, true);
       assert.equal(cached.omm.NORAD_CAT_ID, 101292);
@@ -139,6 +143,15 @@ describe('worker push alerts', { concurrency: false }, () => {
       assert.equal(calls.length, 1);
       assert.equal(again.get(101292).norad, 101292);
       assert.equal(String(again.get(101292).satrec.satnum), '101292');
+
+      const stored = await kv.get('tle:sat:101292', 'json');
+      stored.goodMs = Date.now() - 3 * 3600 * 1000;
+      stored.fetchedMs = stored.goodMs;
+      await kv.put('tle:sat:101292', JSON.stringify(stored));
+      const refresh = new Map();
+      await tleFor(env, core, refresh, 101292);
+      assert.equal(calls.length, 2);
+      assert.equal(refresh.get(101292).norad, 101292);
     });
   });
 
@@ -153,7 +166,9 @@ describe('worker push alerts', { concurrency: false }, () => {
       assert.equal(calls.length, 1);
       const cached = await kv.get('tle:sat:101292', 'json');
       assert.equal(cached.ok, false);
+      assert.equal(cached.reason, 'not-found');
       assert.equal(cached.status, 404);
+      assert.equal(cached.omm, undefined);
       assert.equal(kv.puts.find(p => p.key === 'tle:sat:101292').opts.expirationTtl, 2 * 3600);
 
       const later = new Map();
@@ -180,30 +195,47 @@ describe('worker push alerts', { concurrency: false }, () => {
         return [passFor(sat, eventT)];
       }
     };
-    await withMocks((url) => {
-      if (url.includes('CATNR=101292')) throw new Error('The operation was aborted due to timeout');
-      if (url.includes('CATNR=25544')) return Response.json([{ NORAD_CAT_ID: 25544, OBJECT_NAME: 'ISS (ZARYA)' }]);
-      if (url.startsWith('https://push.test/')) return new Response(null, { status: 201 });
-      throw new Error('unexpected fetch ' + url);
-    }, async ({ calls, logs }) => {
-      const rec = {
-        endpoint: sub.endpoint, keys: sub.keys,
-        lat: 0, lon: 0, norads: [101292, 25544],
-        leadMin: 10, visOnly: true, minMag: null, sent: {}
-      };
-      await alertOne(env, core, new Map(), rec, 'sub:demo', now, CRON_WINDOW_MS);
-      const rows = parsed(logs);
-      const satErr = rows.find(r => r.kind === 'sat-error');
-      assert.equal(satErr.norad, 101292);
-      assert.match(satErr.error, /timeout/);
-      const push = rows.find(r => r.kind === 'push');
-      assert.deepEqual(push, { kind: 'push', norad: 25544, status: 201 });
-      assert.equal(calls.filter(u => u.startsWith('https://push.test/')).length, 1);
-      assert.ok(rec.sent[`25544:${Math.round(eventT / 60000)}`]);
-      const miss = await kv.get('tle:sat:101292', 'json');
-      assert.equal(miss.ok, false);
-      assert.equal(miss.status, 0);
-    });
+    let releaseSlow = () => {};
+    const slow = new Promise(resolve => { releaseSlow = resolve; });
+    try {
+      await withMocks(async (url) => {
+        if (url.includes('CATNR=101292')) {
+          await slow;
+          throw new Error('The operation was aborted due to timeout');
+        }
+        if (url.includes('CATNR=25544')) return Response.json([{ NORAD_CAT_ID: 25544, OBJECT_NAME: 'ISS (ZARYA)' }]);
+        if (url.startsWith('https://push.test/')) return new Response(null, { status: 201 });
+        throw new Error('unexpected fetch ' + url);
+      }, async ({ calls, logs }) => {
+        const rec = {
+          endpoint: sub.endpoint, keys: sub.keys,
+          lat: 0, lon: 0, norads: [101292, 25544],
+          leadMin: 10, visOnly: true, minMag: null, sent: {}
+        };
+        const pending = alertOne(env, core, new Map(), rec, 'sub:demo', now, CRON_WINDOW_MS);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.ok(calls.some(u => u.includes('CATNR=25544')));
+        releaseSlow();
+        await pending;
+        const rows = parsed(logs);
+        const satErr = rows.find(r => r.kind === 'sat-error');
+        assert.equal(satErr.norad, 101292);
+        assert.match(satErr.error, /timeout/);
+        assert.equal(satErr.failure, 'transient');
+        assert.equal(satErr.stale, false);
+        const push = rows.find(r => r.kind === 'push');
+        assert.deepEqual(push, { kind: 'push', norad: 25544, status: 201 });
+        assert.equal(calls.filter(u => u.startsWith('https://push.test/')).length, 1);
+        assert.ok(rec.sent[`25544:${Math.round(eventT / 60000)}`]);
+        const miss = await kv.get('tle:sat:101292', 'json');
+        assert.equal(miss.ok, false);
+        assert.equal(miss.reason, 'transient');
+        assert.equal(miss.status, 0);
+        assert.notEqual(kv.puts.find(p => p.key === 'tle:sat:101292').opts.expirationTtl, 2 * 3600);
+      });
+    } finally {
+      releaseSlow();
+    }
   });
 
   test('a skipped cron still alerts, and a 5-minute window does not', async () => {
@@ -361,6 +393,289 @@ describe('worker push alerts', { concurrency: false }, () => {
     assert.equal(kept.lat, 40.71);
     assert.equal(kept.lon, -74.01);
     assert.equal(kept.sent['25544:100'], sentAt);
+  });
+
+  test('a timeout is retried on the next tick and is not a 2-hour miss', async () => {
+    const core = await loadSatCore();
+    const kv = memoryKv();
+    const env = { ALERTS: kv, VAPID_SUBJECT: 'mailto:satpass@lukedw09.workers.dev' };
+    const clock = { t: Date.parse('2026-11-18T22:10:00Z') };
+    const prevNow = Date.now;
+    Date.now = () => clock.t;
+    let mode = 'timeout';
+    try {
+      await withMocks((url, opts) => {
+        assert.match(opts.headers['User-Agent'], /SatPass\/1\.0 \(mailto:satpass@lukedw09.workers.dev\)/);
+        if (mode === 'timeout') throw new Error('The operation was aborted due to timeout');
+        assert.match(url, /CATNR=101292/);
+        return Response.json([OMM_101292]);
+      }, async ({ calls }) => {
+        const first = new Map();
+        await tleFor(env, core, first, 101292);
+        assert.equal(first.get(101292).miss, true);
+        assert.equal(calls.length, 1);
+        const failed = await kv.get('tle:sat:101292', 'json');
+        assert.equal(failed.reason, 'transient');
+        assert.equal(failed.status, 0);
+        assert.equal(failed.ok, false);
+        assert.ok(failed.retryAt > clock.t);
+        assert.ok(failed.retryAt <= clock.t + 5 * 60 * 1000);
+        assert.equal(kv.puts.find(p => p.key === 'tle:sat:101292').opts.expirationTtl, 3 * 24 * 3600);
+
+        const immediate = new Map();
+        await tleFor(env, core, immediate, 101292);
+        assert.equal(calls.length, 1);
+        assert.equal(immediate.get(101292).miss, true);
+
+        clock.t += 5 * 60 * 1000;
+        mode = 'ok';
+        const next = new Map();
+        await tleFor(env, core, next, 101292);
+        assert.equal(calls.length, 2);
+        assert.equal(next.get(101292).norad, 101292);
+        assert.equal(String(next.get(101292).satrec.satnum), '101292');
+        const saved = await kv.get('tle:sat:101292', 'json');
+        assert.equal(saved.ok, true);
+        assert.equal(saved.reason, 'ok');
+        assert.equal(saved.omm.NORAD_CAT_ID, 101292);
+      });
+    } finally {
+      Date.now = prevNow;
+    }
+  });
+
+  test('an old timeout miss is fetched again instead of blocking the satellite', async () => {
+    const core = await loadSatCore();
+    const kv = memoryKv();
+    const env = { ALERTS: kv };
+    await kv.put('tle:sat:101292', JSON.stringify({
+      ok: false, status: 0, fetchedMs: Date.now() - 60 * 1000
+    }));
+    await withMocks(() => Response.json([OMM_101292]), async ({ calls }) => {
+      const catalog = new Map();
+      await tleFor(env, core, catalog, 101292);
+      assert.equal(calls.length, 1);
+      assert.equal(catalog.get(101292).norad, 101292);
+      const saved = await kv.get('tle:sat:101292', 'json');
+      assert.equal(saved.reason, 'ok');
+      assert.equal(saved.ok, true);
+    });
+  });
+
+  test('HTTP 503 and 429 are retried with backoff, not cached as not-found', async () => {
+    const core = await loadSatCore();
+    const kv = memoryKv();
+    const env = { ALERTS: kv };
+    const clock = { t: Date.parse('2026-11-18T22:10:00Z') };
+    const prevNow = Date.now;
+    Date.now = () => clock.t;
+    let status = 503;
+    try {
+      await withMocks(() => new Response('busy', {
+        status,
+        headers: status === 429 ? { 'retry-after': '1800' } : {}
+      }), async ({ calls }) => {
+        await tleFor(env, core, new Map(), 101292);
+        const failed = await kv.get('tle:sat:101292', 'json');
+        assert.equal(failed.reason, 'transient');
+        assert.equal(failed.status, 503);
+        assert.notEqual(kv.puts.find(p => p.key === 'tle:sat:101292').opts.expirationTtl, 2 * 3600);
+        clock.t += 5 * 60 * 1000;
+        await tleFor(env, core, new Map(), 101292);
+        assert.equal(calls.length, 2);
+
+        status = 429;
+        clock.t += 3 * 3600 * 1000;
+        await tleFor(env, core, new Map(), 101292);
+        const limited = await kv.get('tle:sat:101292', 'json');
+        assert.equal(limited.reason, 'transient');
+        assert.equal(limited.status, 429);
+        assert.ok(limited.retryAt >= clock.t + 1800 * 1000);
+        const before = calls.length;
+        clock.t += 5 * 60 * 1000;
+        await tleFor(env, core, new Map(), 101292);
+        assert.equal(calls.length, before);
+        clock.t = limited.retryAt + 1000;
+        await tleFor(env, core, new Map(), 101292);
+        assert.equal(calls.length, before + 1);
+      });
+    } finally {
+      Date.now = prevNow;
+    }
+  });
+
+  test('a timeout with stale elements still sends the alert', async () => {
+    const sub = await fakeSub();
+    const kv = memoryKv();
+    const env = { ALERTS: kv, SATPASS_DEV: '1', VAPID_SUBJECT: 'mailto:demo@example.com' };
+    const now = Date.parse('2026-11-18T22:10:00Z');
+    const eventT = now + 9 * 60 * 1000;
+    const prevNow = Date.now;
+    Date.now = () => now;
+    await kv.put('tle:sat:101292', JSON.stringify({
+      ok: true,
+      reason: 'ok',
+      omm: OMM_101292,
+      fetchedMs: now - 3 * 3600 * 1000,
+      goodMs: now - 3 * 3600 * 1000,
+      failures: 0
+    }));
+    const core = {
+      standardMagnitude() { return null; },
+      makeSat() { throw new Error('bundle TLE should not be required'); },
+      makeSatFromOmm(omm) {
+        return { norad: +omm.NORAD_CAT_ID, name: omm.OBJECT_NAME, satrec: { ok: true } };
+      },
+      findPasses(sat) { return [passFor(sat, eventT)]; }
+    };
+    try {
+      await withMocks((url) => {
+        if (url.includes('celestrak.org')) throw new Error('The operation was aborted due to timeout');
+        if (url.startsWith('https://push.test/')) return new Response(null, { status: 201 });
+        throw new Error('unexpected fetch ' + url);
+      }, async ({ calls, logs }) => {
+        const rec = {
+          endpoint: sub.endpoint, keys: sub.keys,
+          lat: 0, lon: 0, norads: [101292],
+          leadMin: 10, visOnly: true, minMag: null, sent: {}
+        };
+        await alertOne(env, core, new Map(), rec, 'sub:stale', now, CRON_WINDOW_MS);
+        const rows = parsed(logs);
+        const satErr = rows.find(r => r.kind === 'sat-error');
+        assert.equal(satErr.norad, 101292);
+        assert.equal(satErr.failure, 'transient');
+        assert.equal(satErr.stale, true);
+        assert.match(satErr.error, /timeout/);
+        assert.deepEqual(rows.find(r => r.kind === 'push'), { kind: 'push', norad: 101292, status: 201 });
+        assert.equal(calls.filter(u => u.startsWith('https://push.test/')).length, 1);
+        assert.ok(rec.sent[`101292:${Math.round(eventT / 60000)}`]);
+        const saved = await kv.get('tle:sat:101292', 'json');
+        assert.equal(saved.reason, 'transient');
+        assert.equal(saved.omm.NORAD_CAT_ID, 101292);
+        assert.equal(saved.goodMs, now - 3 * 3600 * 1000);
+        assert.ok(saved.retryAt > now);
+      });
+    } finally {
+      Date.now = prevNow;
+    }
+  });
+
+  test('a timeout falls back to the cached group bundle', async () => {
+    const sub = await fakeSub();
+    const kv = memoryKv();
+    const env = { ALERTS: kv, SATPASS_DEV: '1', VAPID_SUBJECT: 'mailto:demo@example.com' };
+    const now = Date.parse('2026-11-18T22:10:00Z');
+    const eventT = now + 9 * 60 * 1000;
+    await kv.put('tle:bundle', JSON.stringify({ fetchedMs: Date.now() - 60 * 1000, text: ONE_TLE }));
+    const core = {
+      standardMagnitude() { return null; },
+      makeSatFromOmm() { throw new Error('no per-satellite elements'); },
+      parseTLE(text) {
+        assert.match(text, /ISS/);
+        return [{ norad: 25544, name: 'ISS (ZARYA)', l1: '1', l2: '2' }];
+      },
+      makeSat(rec) { return { norad: rec.norad, name: rec.name, satrec: { ok: true } }; },
+      findPasses(sat) { return [passFor(sat, eventT)]; }
+    };
+    await withMocks((url) => {
+      if (url.includes('celestrak.org')) throw new Error('The operation was aborted due to timeout');
+      if (url.startsWith('https://push.test/')) return new Response(null, { status: 201 });
+      throw new Error('unexpected fetch ' + url);
+    }, async ({ logs }) => {
+      const rec = {
+        endpoint: sub.endpoint, keys: sub.keys,
+        lat: 0, lon: 0, norads: [25544],
+        leadMin: 10, visOnly: true, minMag: null, sent: {}
+      };
+      await alertOne(env, core, new Map(), rec, 'sub:bundle', now, CRON_WINDOW_MS);
+      const rows = parsed(logs);
+      const satErr = rows.find(r => r.kind === 'sat-error');
+      assert.equal(satErr.norad, 25544);
+      assert.equal(satErr.failure, 'transient');
+      assert.equal(satErr.stale, true);
+      assert.deepEqual(rows.find(r => r.kind === 'push'), { kind: 'push', norad: 25544, status: 201 });
+      assert.ok(rec.sent[`25544:${Math.round(eventT / 60000)}`]);
+    });
+  });
+
+  test('elements older than 3 days are not used after a timeout', async () => {
+    const core = await loadSatCore();
+    const kv = memoryKv();
+    const env = { ALERTS: kv };
+    const now = Date.parse('2026-11-18T22:10:00Z');
+    const prevNow = Date.now;
+    Date.now = () => now;
+    await kv.put('tle:sat:101292', JSON.stringify({
+      ok: true, reason: 'ok', omm: OMM_101292,
+      fetchedMs: now - 4 * 24 * 3600 * 1000,
+      goodMs: now - 4 * 24 * 3600 * 1000
+    }));
+    await kv.put('tle:bundle', JSON.stringify({ fetchedMs: now - 4 * 24 * 3600 * 1000, text: ONE_TLE }));
+    try {
+      await withMocks(() => { throw new Error('The operation was aborted due to timeout'); }, async ({ logs }) => {
+        const catalog = new Map();
+        await tleFor(env, core, catalog, 101292);
+        assert.equal(catalog.get(101292).miss, true);
+        const row = parsed(logs).find(r => r.kind === 'sat-error');
+        assert.equal(row.failure, 'transient');
+        assert.equal(row.stale, false);
+        const saved = await kv.get('tle:sat:101292', 'json');
+        assert.equal(saved.omm, undefined);
+      });
+    } finally {
+      Date.now = prevNow;
+    }
+  });
+
+  test('a 404 replaces a stale copy and stays cached', async () => {
+    const core = await loadSatCore();
+    const kv = memoryKv();
+    const env = { ALERTS: kv };
+    const now = Date.parse('2026-11-18T22:10:00Z');
+    const prevNow = Date.now;
+    Date.now = () => now;
+    await kv.put('tle:sat:101292', JSON.stringify({
+      ok: true, reason: 'ok', omm: OMM_101292,
+      fetchedMs: now - 3 * 3600 * 1000,
+      goodMs: now - 3 * 3600 * 1000
+    }));
+    try {
+      await withMocks(() => new Response('No GP data found', { status: 404 }), async ({ calls }) => {
+        const catalog = new Map();
+        await tleFor(env, core, catalog, 101292);
+        assert.equal(calls.length, 1);
+        assert.equal(catalog.get(101292).miss, true);
+        const cached = await kv.get('tle:sat:101292', 'json');
+        assert.equal(cached.reason, 'not-found');
+        assert.equal(cached.omm, undefined);
+        await tleFor(env, core, new Map(), 101292);
+        assert.equal(calls.length, 1);
+      });
+    } finally {
+      Date.now = prevNow;
+    }
+  });
+
+  test('a failed bundle refresh keeps the previous elements and backs off', async () => {
+    const kv = memoryKv();
+    const env = { ALERTS: kv };
+    const old = Date.now() - 3 * 3600 * 1000;
+    await kv.put('tle:bundle', JSON.stringify({ fetchedMs: old, text: BUNDLE }));
+    await withMocks(() => new Response('down', { status: 503 }), async ({ calls, logs }) => {
+      await runCron(env);
+      assert.equal(calls.length, 2);
+      const saved = await kv.get('tle:bundle', 'json');
+      assert.equal(saved.text, BUNDLE);
+      assert.equal(saved.fetchedMs, old);
+      assert.ok(saved.retryAt > Date.now());
+      const row = parsed(logs).find(r => r.kind === 'tle-refresh-failed');
+      assert.equal(row.failure, 'transient');
+      assert.equal(row.stale, true);
+      assert.ok(Number(await kv.get('meta:lastRun')) > 0);
+      const afterFail = calls.length;
+      await runCron(env);
+      assert.equal(calls.length, afterFail);
+    });
   });
 
   test('cron records its run time and does not move it when elements are unavailable', async () => {
