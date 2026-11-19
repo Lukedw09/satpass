@@ -10,12 +10,12 @@ const sub = {
 
 test('subscription validation rounds location and rejects bad input', async () => {
   const ok = validateSubscription({
-    subscription: sub, lat: 30.5884, lon: -84.2439,
+    subscription: sub, lat: 34.0523, lon: -118.2537,
     norads: [25544, 25544, 20580], leadMin: 10, visOnly: true, minMag: 3
   });
   assert.equal(ok.error, undefined);
-  assert.equal(ok.value.lat, 30.59);
-  assert.equal(ok.value.lon, -84.24);
+  assert.equal(ok.value.lat, 34.05);
+  assert.equal(ok.value.lon, -118.25);
   assert.deepEqual(ok.value.norads, [25544, 20580]);
   assert.equal(ok.value.minMag, 3);
   assert.equal(validateSubscription({ subscription: { endpoint: 'http://x', keys: sub.keys } }).error.includes('https'), true);

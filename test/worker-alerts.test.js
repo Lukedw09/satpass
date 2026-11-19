@@ -347,8 +347,8 @@ describe('worker push alerts', { concurrency: false }, () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         subscription: sub,
-        lat: 30.5884,
-        lon: -84.2439,
+        lat: 34.0523,
+        lon: -118.2537,
         norads: [25544],
         leadMin: 10,
         visOnly: true,
@@ -364,8 +364,8 @@ describe('worker push alerts', { concurrency: false }, () => {
     const created = await post('/api/push/subscribe');
     assert.equal(created.status, 200);
     const createdBody = await created.json();
-    assert.equal(createdBody.lat, 30.59);
-    assert.equal(createdBody.lon, -84.24);
+    assert.equal(createdBody.lat, 34.05);
+    assert.equal(createdBody.lon, -118.25);
     const id = await subscriptionId(sub.endpoint);
     const stored = await kv.get('sub:' + id, 'json');
     const sentAt = Date.now();

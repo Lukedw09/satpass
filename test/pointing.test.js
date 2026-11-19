@@ -87,10 +87,10 @@ test('magnetic heading plus east-positive declination wraps to true azimuth', ()
   assert.ok(Math.abs(C.trueAzimuth(10, -20) - 350) < 1e-9);
 });
 
-test('declination near Killearn Lakes is a few degrees west', () => {
-  // magnetic-declination.com lists Tallahassee at about −5.4°. The degree-6
-  // truncation of WMM2025 should land within a degree of that.
-  const d = C.magneticDeclination(30.588, -84.243, 2026.87);
-  assert.ok(d < -4 && d > -7, `declination ${d}`);
+test('declination near downtown Los Angeles is about 11° east', () => {
+  // WMM2025 puts downtown Los Angeles near +11° (east) in late 2026. The degree-6
+  // truncation should land within a degree of that.
+  const d = C.magneticDeclination(34.05, -118.25, 2026.87);
+  assert.ok(d > 10 && d < 12.5, `declination ${d}`);
   assert.ok(C.magneticDeclination(-33.87, 151.21, 2026.87) > 0);
 });

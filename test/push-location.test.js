@@ -13,14 +13,14 @@ const sub = {
 
 test('client rounding matches the worker, at 0.01 degree', () => {
   const samples = [
-    [30.5884, -84.2439],
-    [30.588, -84.243],
+    [34.0523, -118.2537],
+    [34.05, -118.25],
     [40.7128, -74.006],
     [0, 0],
     [-90, -180],
     [90, 180],
     [1.005, -1.005],
-    [-84.245, 30.994]
+    [-33.8688, 151.2093]
   ];
   for (const [lat, lon] of samples) {
     const got = validateSubscription({ subscription: sub, lat, lon, norads: [25544], leadMin: 10 });
@@ -37,47 +37,47 @@ test('client rounding matches the worker, at 0.01 degree', () => {
 });
 
 test('a push sync is needed only when the rounded place differs', () => {
-  const home = { lat: 30.588, lon: -84.243 };
-  const stored = { lat: 30.59, lon: -84.24 };
+  const here = { lat: 34.0523, lon: -118.2537 };
+  const stored = { lat: 34.05, lon: -118.25 };
   assert.equal(Loc.locationNeedsSync(false, { lat: 40, lon: -75 }, stored), false);
-  assert.equal(Loc.locationNeedsSync(true, home, stored), false);
-  assert.equal(Loc.locationNeedsSync(true, { lat: 30.591, lon: -84.244 }, stored), false);
+  assert.equal(Loc.locationNeedsSync(true, here, stored), false);
+  assert.equal(Loc.locationNeedsSync(true, { lat: 34.054, lon: -118.246 }, stored), false);
   assert.equal(Loc.locationNeedsSync(true, { lat: 40.7128, lon: -74.006 }, stored), true);
-  assert.equal(Loc.locationNeedsSync(true, home, null), true);
-  assert.equal(Loc.locationNeedsSync(true, home, {}), true);
+  assert.equal(Loc.locationNeedsSync(true, here, null), true);
+  assert.equal(Loc.locationNeedsSync(true, here, {}), true);
   assert.equal(Loc.locationNeedsSync(true, { lat: 91, lon: 0 }, null), false);
 });
 
 test('the accepted place prefers the server coordinates and stays rounded', () => {
   const fromServer = Loc.acceptedPlace(40.71, -74.01, 40.7128, -74.006);
   assert.deepEqual(fromServer, { lat: 40.71, lon: -74.01 });
-  const fromSent = Loc.acceptedPlace(undefined, undefined, 30.5884, -84.2439);
-  assert.deepEqual(fromSent, { lat: 30.59, lon: -84.24 });
+  const fromSent = Loc.acceptedPlace(undefined, undefined, 34.0523, -118.2537);
+  assert.deepEqual(fromSent, { lat: 34.05, lon: -118.25 });
   assert.deepEqual(Loc.acceptedPlace('', '', 0, 0), { lat: 0, lon: 0 });
   assert.equal(Loc.acceptedPlace(undefined, undefined, 91, 0), null);
 });
 
 test('alert status shows the rounded place, and a failed sync keeps the old one', () => {
-  const synced = { lat: 30.59, lon: -84.24 };
-  const obs = { lat: 30.588, lon: -84.243 };
+  const synced = { lat: 34.05, lon: -118.25 };
+  const obs = { lat: 34.0523, lon: -118.2537 };
   const moved = { lat: 40.7128, lon: -74.006 };
   const quiet = Loc.alertLocationStatus({ on: false, synced, obs: moved, failed: true });
   assert.deepEqual(quiet, { text: '', err: false });
 
   const current = Loc.alertLocationStatus({ on: true, synced, obs, failed: false });
   assert.equal(current.err, false);
-  assert.equal(current.text, 'Closed-tab alerts use 30.59°, -84.24°.');
-  assert.equal(current.text.includes('30.588'), false);
+  assert.equal(current.text, 'Closed-tab alerts use 34.05°, -118.25°.');
+  assert.equal(current.text.includes('34.052'), false);
   assert.equal(/\d+\.\d{3}/.test(current.text), false);
 
   const pending = Loc.alertLocationStatus({ on: true, synced, obs: moved, failed: false });
   assert.equal(pending.err, false);
-  assert.equal(pending.text, 'Closed-tab alerts use 30.59°, -84.24°.');
+  assert.equal(pending.text, 'Closed-tab alerts use 34.05°, -118.25°.');
   assert.equal(pending.text.includes('40.71'), false);
 
   const failed = Loc.alertLocationStatus({ on: true, synced, obs: moved, failed: true });
   assert.equal(failed.err, true);
-  assert.equal(failed.text, 'Closed-tab alerts are still using 30.59°, -84.24°.');
+  assert.equal(failed.text, 'Closed-tab alerts are still using 34.05°, -118.25°.');
   assert.equal(failed.text.includes('40.71'), false);
   assert.equal(/\d+\.\d{3}/.test(failed.text), false);
 

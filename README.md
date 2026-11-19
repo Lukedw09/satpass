@@ -6,11 +6,11 @@
 
 ![SatPass, with a pass list, sky chart, and live ground track](docs/screenshot.png)
 
-It opens on Killearn Lakes, north Tallahassee, Florida (30.588° N, 84.243° W, 60 m). Every clock time on the page is Eastern Time (EST or EDT), even if you move the observer somewhere else.
+It opens on downtown Los Angeles (34.05° N, 118.25° W, 90 m). Every clock time on the page is Eastern Time (EST or EDT), even if you move the observer somewhere else.
 
 ## Set your location
 
-Under **Observer**, type a name, latitude, longitude, and elevation in meters. Or click **Use my location** and let the browser fill them in (it will ask permission). **Killearn Lakes** restores the default spot. This browser remembers your place, your filters, and your satellite list.
+Under **Observer**, type a name, latitude, longitude, and elevation in meters. Or click **Use my location** and let the browser fill them in (it will ask permission). **Los Angeles** restores the default spot. This browser remembers your place, your filters, and your satellite list.
 
 ## Add and remove satellites
 

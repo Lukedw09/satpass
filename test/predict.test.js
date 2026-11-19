@@ -95,7 +95,7 @@ test('observer range from ECI positions matches satellite.js slant range', () =>
   const rec = C.parseTLE(fb.tle).find(r => r.norad === 25544);
   const sat = C.makeSat(rec);
   const when = new Date('2026-11-15T23:30:00Z');
-  const gd = C.observerGd({ lat: 30.588, lon: -84.243, elev: 60 });
+  const gd = C.observerGd({ lat: 34.05, lon: -118.25, elev: 90 });
   const look = C.look(sat, when, gd);
   const obs = C.observerEci(gd, look.gmst);
   const range = Math.hypot(look.eci.x - obs.x, look.eci.y - obs.y, look.eci.z - obs.z);
