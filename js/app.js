@@ -11,7 +11,7 @@
   const LS_TLE = 'satpass.tle.v1', LS_SET = 'satpass.settings.v1', LS_CUSTOM = 'satpass.custom.v1', LS_ALERTS = 'satpass.alerts.v1', LS_CLOUD = 'satpass.clouds.v1', LS_PUSH = 'satpass.push.v1';
   const CLOUD_TTL = 3600e3;
   const CELESTRAK_SATCAT = 'https://celestrak.org/satcat/records.php';
-  const HOME = { name: 'Killearn Lakes, Tallahassee FL', lat: 30.588, lon: -84.243, elev: 60 };
+  const HOME = { name: 'Los Angeles', lat: 34.05, lon: -118.25, elev: 90 };
   const ISS_NORAD = 25544;
   const DEFAULT_SATS = [25544, 48274, 20580, 27386, 25407, 22566];
   const PALETTE = ['#ffd166', '#ff7b7b', '#6ea8ff', '#3ddc97', '#c792ea', '#ff9f43', '#4dd0e1', '#f78fb3', '#a3e635', '#e2e8f0'];
@@ -20,6 +20,7 @@
   const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* quota / private mode */ } };
 
+  // A place already stored in this browser replaces HOME. Opening the page does not overwrite it.
   const settings = Object.assign({ obs: { ...HOME }, days: 7, minEl: 10, sunMax: -6, visOnly: true, maxMag: null,
     sats: DEFAULT_SATS.map(n => ({ norad: n, on: true })) }, load(LS_SET, {}));
   let custom = load(LS_CUSTOM, {});        // norad -> {name,l1,l2,norad} for objects added by search
